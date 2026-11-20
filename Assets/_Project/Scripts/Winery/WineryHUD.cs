@@ -11,17 +11,13 @@ namespace Vineyard.Winery
     [RequireComponent(typeof(PlayerInteractor))]
     public class WineryHUD : MonoBehaviour
     {
-        public float messageSeconds = 2.2f;
-
         PlayerInteractor interactor;
         PlayerBucket bucket;
 
-        struct Message { public string text; public bool good; public float time; }
         struct Floater { public Vector3 pos; public string text; public float time; }
-        readonly List<Message> messages = new List<Message>();
         readonly List<Floater> floaters = new List<Floater>();
 
-        GUIStyle title, body, small, center, floatStyle, msgStyle;
+        GUIStyle title, body, small, center, right, floatStyle;
         Texture2D white;
         float bucketPulse;
         int lastAmount = -1;
@@ -33,7 +29,6 @@ namespace Vineyard.Winery
         {
             interactor = GetComponent<PlayerInteractor>();
             bucket = GetComponent<PlayerBucket>();
-            interactor.Feedback += (m, ok) => { messages.Add(new Message { text = m, good = ok, time = Time.unscaledTime }); if (messages.Count > 3) messages.RemoveAt(0); };
             interactor.FloatingText += (p, t) => floaters.Add(new Floater { pos = p, text = t, time = Time.unscaledTime });
         }
 
@@ -56,8 +51,8 @@ namespace Vineyard.Winery
             body = new GUIStyle(GUI.skin.label) { fontSize = 15, alignment = TextAnchor.MiddleCenter, richText = true };
             small = new GUIStyle(GUI.skin.label) { fontSize = 13, alignment = TextAnchor.MiddleCenter, richText = true };
             center = new GUIStyle(GUI.skin.label) { fontSize = 14, alignment = TextAnchor.MiddleLeft, richText = true };
+            right = new GUIStyle(GUI.skin.label) { fontSize = 13, alignment = TextAnchor.MiddleRight, richText = true };
             floatStyle = new GUIStyle(GUI.skin.label) { fontSize = 22, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
-            msgStyle = new GUIStyle(GUI.skin.label) { fontSize = 17, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter, richText = true };
         }
 
         void Box(Rect r, Color c) { var old = GUI.color; GUI.color = c; GUI.DrawTexture(r, white); GUI.color = old; }
@@ -118,22 +113,25 @@ namespace Vineyard.Winery
                 Box(r, Panel);
                 Box(new Rect(r.x, r.y, 4, r.height), ColorOf(t));
                 Shadowed(new Rect(r.x + 14, r.y + 6, 200, 20), "<b>BUCKET</b>", center, new Color(0.85f, 0.82f, 0.75f));
-                string label = t == ResourceType.Empty ? "EMPTY" : t.Label().ToUpperInvariant();
-                Shadowed(new Rect(r.x + 14, r.y + 28, 210, 24), $"<size={18 + Mathf.RoundToInt(bucketPulse * 4)}><b>{label}</b></size>", center, ColorOf(t));
-                Shadowed(new Rect(r.x + 14, r.y + 52, 210, 20), $"{bucket.Amount} / {bucket.Capacity}{(t.IsLiquid() ? " L" : "")}", center, Color.white);
-                Bar(new Rect(r.x + 14, r.y + 76, r.width - 28, 12), bucket.Fill, ColorOf(t));
+                if (bucket.HasBucket && !bucket.IsPouring)
+                    Shadowed(new Rect(r.x + 14, r.y + 6, r.width - 28, 20),
+                             (bucket.Amount > 0 ? "<color=#FFD98A>[G]</color> Empty   " : "") + "<color=#FFD98A>[B]</color> Put down", right, new Color(0.85f, 0.82f, 0.75f));
+                if (!bucket.HasBucket)
+                {
+                    Shadowed(new Rect(r.x + 14, r.y + 28, 210, 24), "<size=18><b>HANDS FREE</b></size>", center, new Color(0.8f, 0.8f, 0.8f));
+                    Shadowed(new Rect(r.x + 14, r.y + 54, 210, 36), "Click a bucket to pick it up", center, new Color(0.85f, 0.82f, 0.75f));
+                }
+                else
+                {
+                    string label = t == ResourceType.Empty ? "EMPTY" : t.Label().ToUpperInvariant();
+                    Shadowed(new Rect(r.x + 14, r.y + 28, 210, 24), $"<size={18 + Mathf.RoundToInt(bucketPulse * 4)}><b>{label}</b></size>", center, ColorOf(t));
+                    Shadowed(new Rect(r.x + 14, r.y + 52, 210, 20), $"{bucket.Amount} / {bucket.Capacity}{(t.IsLiquid() ? " L" : "")}", center, Color.white);
+                    Bar(new Rect(r.x + 14, r.y + 76, r.width - 28, 12), bucket.Fill, ColorOf(t));
+                }
             }
 
-            // Feedback messages (above the bucket line, centre).
             float now = Time.unscaledTime;
-            messages.RemoveAll(m => now - m.time > messageSeconds);
-            for (int i = 0; i < messages.Count; i++)
-            {
-                var m = messages[messages.Count - 1 - i];
-                float a = Mathf.Clamp01((messageSeconds - (now - m.time)) / 0.4f);
-                Color c = m.good ? new Color(0.75f, 1f, 0.7f, a) : new Color(1f, 0.6f, 0.5f, a);
-                Shadowed(new Rect(w / 2 - 300, h - 150 - i * 28, 600, 28), m.text, msgStyle, c);
-            }
+
 
             // Floating texts rising from the station.
             var cam = Camera.current != null ? Camera.current : Camera.main;

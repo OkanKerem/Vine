@@ -132,7 +132,7 @@ namespace Vineyard.Winery
                 if (bucket.Type != ResourceType.GrapeJuice)
                 {
                     if (state == FermentState.WineReady && wine > 0) return Blocked(title, Status, "Wine ready — use the tap", prog);
-                    return Blocked(title, Status, bucket.Type == ResourceType.Empty ? "Bring grape juice in your bucket" : "Wrong Resource Type", prog);
+                    return Blocked(title, Status, bucket.Type == ResourceType.Empty ? BringHint(bucket, "grape juice") : HoldsOther(bucket), prog);
                 }
                 if (Acceptable <= 0) return Blocked(title, Status, wine > 0 ? "Machine Full — collect the wine" : "Machine Full", prog);
                 return Action(title, Status, $"Add Grape Juice — {juice}/{inputCapacity} L", prog);
