@@ -21,6 +21,8 @@ namespace Vineyard.Winery
         Texture2D white;
         float bucketPulse;
         int lastAmount = -1;
+        readonly OnboardingHints hints = new OnboardingHints();
+        GUIStyle hintStyle, hintLabel;
 
         static readonly Color Panel = new Color(0.08f, 0.06f, 0.05f, 0.62f);
         static readonly Color Gold = new Color(1f, 0.86f, 0.55f);
@@ -30,6 +32,11 @@ namespace Vineyard.Winery
             interactor = GetComponent<PlayerInteractor>();
             bucket = GetComponent<PlayerBucket>();
             interactor.FloatingText += (p, t) => floaters.Add(new Floater { pos = p, text = t, time = Time.unscaledTime });
+        }
+
+        void Update()
+        {
+            if (interactor != null && interactor.isLocalPlayer) hints.Tick(interactor, bucket);
         }
 
         static Color ColorOf(ResourceType t)
@@ -53,6 +60,8 @@ namespace Vineyard.Winery
             center = new GUIStyle(GUI.skin.label) { fontSize = 14, alignment = TextAnchor.MiddleLeft, richText = true };
             right = new GUIStyle(GUI.skin.label) { fontSize = 13, alignment = TextAnchor.MiddleRight, richText = true };
             floatStyle = new GUIStyle(GUI.skin.label) { fontSize = 22, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+            hintStyle = new GUIStyle(GUI.skin.label) { fontSize = 16, alignment = TextAnchor.UpperLeft, wordWrap = true, richText = false };
+            hintLabel = new GUIStyle(GUI.skin.label) { fontSize = 11, fontStyle = FontStyle.Bold, alignment = TextAnchor.UpperLeft };
         }
 
         void Box(Rect r, Color c) { var old = GUI.color; GUI.color = c; GUI.DrawTexture(r, white); GUI.color = old; }
@@ -132,6 +141,23 @@ namespace Vineyard.Winery
 
             float now = Time.unscaledTime;
 
+            // One-time tip (top-centre): fades and slides in, holds, fades out.
+            if (hints.Visible)
+            {
+                float age = now - hints.ShownAt;
+                float a = Mathf.Clamp01(age / 0.25f) * Mathf.Clamp01((OnboardingHints.Duration - age) / 0.6f);
+                float slide = (1f - Mathf.Clamp01(age / 0.25f)) * -10f;
+                float tw = Mathf.Min(520f, w - 40f), pad = 16f;
+                float textH = hintStyle.CalcHeight(new GUIContent(hints.Text), tw - pad * 2 - 4);
+                Rect r = new Rect(w / 2 - tw / 2, 28f + slide, tw, textH + 40f);
+                Box(r, new Color(Panel.r, Panel.g, Panel.b, Panel.a * a));
+                Box(new Rect(r.x, r.y, 4, r.height), new Color(Gold.r, Gold.g, Gold.b, a));
+                Shadowed(new Rect(r.x + pad + 4, r.y + 8, tw - pad * 2, 16), "TIP", hintLabel, new Color(Gold.r, Gold.g, Gold.b, a));
+                Shadowed(new Rect(r.x + pad + 4, r.y + 26, tw - pad * 2 - 4, textH), hints.Text, hintStyle, new Color(1f, 0.97f, 0.9f, a));
+                // Thin timer line so the player knows it will go away by itself.
+                float left = Mathf.Clamp01(1f - age / OnboardingHints.Duration);
+                Box(new Rect(r.x + 4, r.yMax - 2, (r.width - 4) * left, 2), new Color(Gold.r, Gold.g, Gold.b, 0.5f * a));
+            }
 
             // Floating texts rising from the station.
             var cam = Camera.current != null ? Camera.current : Camera.main;
