@@ -6,7 +6,8 @@ namespace Vineyard.Winery
     /// <summary>
     /// Manual grape press: GRAPES -> GRAPE_JUICE (1:1).
     /// States: Empty -> Loaded (grapes in) -> Pressing (handle clicked, ~3 s) -> JuiceReady (juice waiting).
-    /// Grapes can be topped up while juice waits, as long as the output can hold the next batch.
+    /// Grapes can always be topped up while juice waits. If a press produces more juice than the output
+    /// bucket holds, the excess overflows onto the ground (lost) — the press never blocks the player.
     ///
     /// Animation is evaluated from the replicated start time, so every client — including late joiners —
     /// sees the same point of the cycle. Moving parts are wrapped in runtime pivots; the scene file and
@@ -40,15 +41,21 @@ namespace Vineyard.Winery
         [Tooltip("Grape pile height when fully compressed (fraction).")]
         [Range(0.1f, 1f)] public float compressedHeight = 0.3f;
         public float juiceMaxHeight = 0.12f;
+        [Tooltip("How long the overflow spill effect runs (s).")]
+        public float spillSeconds = 1.6f;
 
         [SyncVar] int storedGrapes;
         [SyncVar] int juice;
         [SyncVar] PressState state;
         [SyncVar] double pressStart;
+        [SyncVar] double spillStart = -999;
+        [SyncVar] int lastSpill;
 
         public int StoredGrapes => storedGrapes;
         public int Juice => juice;
         public PressState State => state;
+        /// <summary>Litres lost in the most recent overflow (0 if none yet).</summary>
+        public int LastSpill => lastSpill;
 
         Transform screwPivot, platePivot, grapePivot;
         Vector3 screwPivotRest, platePivotRest;
@@ -56,6 +63,7 @@ namespace Vineyard.Winery
         Vector3 grapeScale;
         float shownJuice, shownGrapes;
         bool pivotsBuilt;
+        ParticleSystem spillFx;
 
         void Awake() => BuildPivots();
 
@@ -86,7 +94,10 @@ namespace Vineyard.Winery
         {
             if (isServer && state == PressState.Pressing && Now >= pressStart + pressDuration)
             {
-                juice += storedGrapes;            // 1 grape = 1 juice; output space was reserved when loading
+                int total = juice + storedGrapes;  // 1 grape = 1 juice
+                juice = Mathf.Min(outputCapacity, total);
+                int spilled = total - juice;       // overflow: the output bucket runs over
+                if (spilled > 0) { lastSpill = spilled; spillStart = Now; }
                 storedGrapes = 0;
                 state = PressState.JuiceReady;    // leave Pressing first, then derive the resting state
                 ServerRefreshState();
@@ -101,8 +112,11 @@ namespace Vineyard.Winery
             state = storedGrapes > 0 ? PressState.Loaded : juice > 0 ? PressState.JuiceReady : PressState.Empty;
         }
 
-        /// <summary>Grapes the press can still accept (input space and output space for the next batch).</summary>
-        int Acceptable => Mathf.Max(0, Mathf.Min(inputCapacity - storedGrapes, outputCapacity - juice - storedGrapes));
+        /// <summary>Grapes the press can still accept. Output space is not reserved: excess juice overflows.</summary>
+        int Acceptable => Mathf.Max(0, inputCapacity - storedGrapes);
+
+        /// <summary>Litres that would spill if <paramref name="extraGrapes"/> more were pressed now.</summary>
+        int WouldSpill(int extraGrapes) => Mathf.Max(0, juice + storedGrapes + extraGrapes - outputCapacity);
 
         float Progress => state == PressState.Pressing ? Mathf.Clamp01((float)((Now - pressStart) / pressDuration)) : 0f;
 
@@ -119,14 +133,17 @@ namespace Vineyard.Winery
                 case InteractionPart.PressInput:
                     if (state == PressState.Pressing) return Blocked(title, Status, "Processing...", prog);
                     if (bucket.Type != ResourceType.Grapes)
-                        return Blocked(title, Status, bucket.Type == ResourceType.Empty ? "Bring grapes in your bucket" : "Wrong Resource Type", prog);
-                    if (Acceptable <= 0) return Blocked(title, Status, juice > 0 ? "Machine Full — collect the juice" : "Machine Full", prog);
-                    return Action(title, Status, $"Add Grapes — {storedGrapes}/{inputCapacity}", prog);
+                        return Blocked(title, Status, bucket.Type == ResourceType.Empty ? BringHint(bucket, "grapes") : HoldsOther(bucket), prog);
+                    if (Acceptable <= 0) return Blocked(title, Status, "Press Full — pull the handle", prog);
+                    int adding = Mathf.Min(Acceptable, bucket.Amount);
+                    int spill = WouldSpill(adding);
+                    return Action(title, Status, spill > 0 ? $"Add Grapes — {spill} L will overflow" : $"Add Grapes — {storedGrapes}/{inputCapacity}", prog);
 
                 case InteractionPart.PressHandle:
                     if (state == PressState.Pressing) return Blocked(title, Status, "Processing...", Progress);
                     if (storedGrapes <= 0) return Blocked(title, Status, "Not Ready — add grapes first");
-                    return Action(title, Status, $"Start Press — {storedGrapes} grapes");
+                    int lost = WouldSpill(0);
+                    return Action(title, Status, lost > 0 ? $"Start Press — {lost} L will overflow" : $"Start Press — {storedGrapes} grapes");
 
                 case InteractionPart.PressOutput:
                     if (juice <= 0) return Blocked(title, Status, state == PressState.Pressing ? "Processing..." : "Not Ready — no juice yet", prog);
@@ -148,7 +165,7 @@ namespace Vineyard.Winery
                     if (state == PressState.Pressing) return "Processing...";
                     if (bucket.Type != ResourceType.Grapes) return bucket.Type == ResourceType.Empty ? "Your bucket is empty" : "Wrong Resource Type";
                     int n = bucket.ServerRemove(ResourceType.Grapes, Acceptable);
-                    if (n <= 0) return "Machine Full";
+                    if (n <= 0) return "Press Full";
                     storedGrapes += n;
                     ServerRefreshState();
                     success = true; floatText = $"-{n} Grapes";
@@ -180,9 +197,32 @@ namespace Vineyard.Winery
 
         // ------------------------------------------------------------------ visuals (every client)
 
+        /// <summary>Runtime copy of the drip emitter, spraying juice over the output bucket's rim.</summary>
+        void BuildSpillFx()
+        {
+            if (spillFx || !juiceStream || !juiceLiquid) return;
+            var go = Instantiate(juiceStream.gameObject, juiceLiquid.parent);
+            go.name = "Winery_JuiceSpill (runtime)";
+            float r = Mathf.Max(0.05f, Mathf.Abs(juiceLiquid.lossyScale.x) * 0.5f);
+            go.transform.position = juiceLiquid.position + Vector3.up * (juiceMaxHeight + 0.02f);
+            go.transform.rotation = Quaternion.Euler(90f, 0f, 0f);   // circle lies flat: particles leave the rim outward
+            spillFx = go.GetComponent<ParticleSystem>();
+            spillFx.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+            var main = spillFx.main; main.startSpeed = new ParticleSystem.MinMaxCurve(0.35f, 0.7f); main.gravityModifier = 1.2f; main.startLifetime = 0.7f;
+            var sh = spillFx.shape; sh.shapeType = ParticleSystemShapeType.Circle; sh.radius = r; sh.radiusThickness = 0f; sh.arc = 360f;
+            var em = spillFx.emission; em.rateOverTime = 120f;
+        }
+
         void UpdateVisuals()
         {
             BuildPivots();
+            BuildSpillFx();
+            if (spillFx)
+            {
+                bool spilling = Now - spillStart >= 0 && Now - spillStart < spillSeconds;
+                if (spilling && !spillFx.isEmitting) spillFx.Play();
+                else if (!spilling && spillFx.isEmitting) spillFx.Stop(true, ParticleSystemStopBehavior.StopEmitting);
+            }
             float t = Progress;
             // Down stroke (eased), then the plate returns.
             float travel = state != PressState.Pressing ? 0f

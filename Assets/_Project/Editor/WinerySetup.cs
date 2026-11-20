@@ -33,6 +33,8 @@ namespace Vineyard.EditorTools
         [MenuItem("Tools/Vineyard/Setup Winery Gameplay")]
         public static void SetupMenu()
         {
+            string w = SetupWorldBucketPrefab();
+            Debug.Log($"[Winery] {w}");
             string p = SetupPlayerPrefab();
             string s = SetupScene();
             EditorSceneManager.SaveOpenScenes();
@@ -41,6 +43,7 @@ namespace Vineyard.EditorTools
 
         public static string SetupAll()
         {
+            SetupWorldBucketPrefab();
             string p = SetupPlayerPrefab();
             string s = SetupScene();
             EditorSceneManager.SaveOpenScenes();
@@ -112,6 +115,47 @@ namespace Vineyard.EditorTools
                 EditorUtility.SetDirty(bucket);
             }
             return "Player prefab: PlayerBucket + PlayerInteractor + WineryHUD + first/third-person buckets.";
+        }
+
+        const string WorldBucketPrefabPath = "Assets/_Project/Resources/" + WorldBucket.ResourcePath + ".prefab";
+
+        /// <summary>
+        /// Resources/WorldBucket.prefab: a bucket standing on the ground (put down with B, spare buckets).
+        /// Same model and content visuals as the carried bucket; registered with Mirror at runtime.
+        /// </summary>
+        [MenuItem("Tools/Vineyard/Build Ground Bucket Prefab")]
+        public static string SetupWorldBucketPrefab()
+        {
+            if (!AssetDatabase.IsValidFolder("Assets/_Project/Resources")) AssetDatabase.CreateFolder("Assets/_Project", "Resources");
+            var root = new GameObject(WorldBucket.ResourcePath);
+            try
+            {
+                root.AddComponent<NetworkIdentity>();
+                var wb = root.AddComponent<WorldBucket>();
+                wb.displayName = "Bucket";
+
+                var visual = BuildBucket(root.transform, "Visual", null, false);
+                visual.transform.localScale = Vector3.one * 1.3f;
+                var model = visual.transform.Find("Model");
+                var modelRenderers = model ? model.GetComponentsInChildren<Renderer>(true) : new Renderer[0];
+                Bounds b = modelRenderers.Length > 0 ? modelRenderers[0].bounds : new Bounds(Vector3.up * 0.15f, Vector3.one * 0.3f);
+                foreach (var r in modelRenderers) b.Encapsulate(r.bounds);
+
+                // Solid box: players bump into it, and raycasts (aim) hit it. Slightly larger than the mesh.
+                var box = root.AddComponent<BoxCollider>();
+                box.center = root.transform.InverseTransformPoint(b.center);
+                box.size = b.size + new Vector3(0.06f, 0.04f, 0.06f);
+
+                var it = root.AddComponent<WineryInteractable>();
+                it.station = wb; it.part = InteractionPart.BucketPickup; it.index = 0;
+                it.highlightRenderers = modelRenderers;
+                it.colliders = new Collider[] { box };
+                wb.interactables = new[] { it };
+
+                var prefab = PrefabUtility.SaveAsPrefabAsset(root, WorldBucketPrefabPath);
+                return prefab ? $"Ground bucket prefab: {WorldBucketPrefabPath} (box {box.size.x:F2}x{box.size.y:F2}x{box.size.z:F2})" : "Ground bucket prefab: SAVE FAILED";
+            }
+            finally { Object.DestroyImmediate(root); }
         }
 
         static GameObject BuildBucket(Transform parent, string name, PlayerBucket bucket, bool view)

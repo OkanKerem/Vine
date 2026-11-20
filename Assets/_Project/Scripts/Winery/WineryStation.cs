@@ -56,11 +56,18 @@ namespace Vineyard.Winery
         /// <summary>Why a bucket cannot take <paramref name="t"/>, or null if it can take at least one unit.</summary>
         protected static string CannotReceive(PlayerBucket bucket, ResourceType t)
         {
-            if (bucket == null) return "No Bucket";
-            if (!bucket.CanHold(t)) return $"Wrong Resource Type — bucket holds {bucket.Type.Label()}";
+            if (bucket == null || !bucket.HasBucket) return "No bucket — pick one up";
+            if (!bucket.CanHold(t)) return HoldsOther(bucket);
             if (bucket.Free <= 0) return "Bucket Full";
             return null;
         }
+
+        /// <summary>Prompt line when the bucket holds something else: tells the player how to get unstuck.</summary>
+        /// <summary>Prompt line for an input when the bucket is empty (or the hands are).</summary>
+        protected static string BringHint(PlayerBucket bucket, string what) =>
+            bucket != null && !bucket.HasBucket ? "No bucket — pick one up" : $"Bring {what} in your bucket";
+
+        protected static string HoldsOther(PlayerBucket bucket) => $"Bucket has {bucket.Type.Label()} — [G] to empty";
 
         protected static float Ease(float t) => t * t * (3f - 2f * t);
 

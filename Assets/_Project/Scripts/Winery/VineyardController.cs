@@ -69,7 +69,7 @@ namespace Vineyard.Winery
             if (Now - lastHarvest[i] < v.harvestCooldown) return null;            // duplicate request
             int avail = grapes[i];
             if (avail <= 0) return "No Grapes — Regrowing";
-            if (!bucket.CanHold(ResourceType.Grapes)) return $"Wrong Resource Type — bucket holds {bucket.Type.Label()}";
+            if (!bucket.CanHold(ResourceType.Grapes)) return bucket.HasBucket ? "Wrong Resource Type" : "No bucket";
             if (bucket.Free <= 0) return "Bucket Full";
 
             int n = bucket.ServerAdd(ResourceType.Grapes, avail);                  // MIN(available, free space)

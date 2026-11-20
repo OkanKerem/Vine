@@ -355,6 +355,80 @@ namespace Vineyard.EditorTools
             float level10 = lr.bounds.max.y;
             if (bottle.glass) { bottle.glass.enabled = false; Shot("t5d_bottle_10L_noglass_diagnostic", bottleSpot + new Vector3(-3.5f, 1.2f, -2.5f), RB(bottle.wineLiquid).center, 60f); bottle.glass.enabled = true; }
 
+            // ---------------- Test 6: no dead ends (overflow, pour out, put down / pick up / swap)
+            Log("\n== Test 6 — Overflow and bucket handling");
+            {
+                // Press overflow: juice waiting in the press no longer blocks new grapes.
+                for (int batch = 0; batch < 2; batch++)
+                {
+                    bucket.ServerAdd(ResourceType.Grapes, 10);
+                    yield return 0.2f;
+                    foreach (var w in Click($"Overflow: add batch {batch + 1}", pressFront, pIn, true)) yield return w;
+                    foreach (var w in Click($"Overflow: press batch {batch + 1}", pressFront, pHandle, true)) yield return w;
+                    foreach (var w in Wait(() => press.State == GrapePressController.PressState.JuiceReady, 6f)) yield return w;
+                }
+                Check("Two batches: press holds 20 L (full output)", press.Juice == 20, $"{press.Juice} L");
+                bucket.ServerAdd(ResourceType.Grapes, 10);
+                yield return 0.2f;
+                foreach (var w in Click("Overflow: add grapes while juice output is full", pressFront, pIn, true)) yield return w;
+                Check("Grapes accepted although the output is full", press.StoredGrapes == 10 && bucket.Amount == 0, $"press {press.StoredGrapes}, {B()}");
+                foreach (var w in Click("Overflow: press with a full output", pressFront, pHandle, true)) yield return w;
+                foreach (var w in Wait(() => press.State != GrapePressController.PressState.Pressing, 6f)) yield return w;
+                yield return 0.15f;
+                Shot("t6a_press_overflow", pressCenter + new Vector3(1.5f, 0.9f, 1.3f), pressCenter + Vector3.down * 0.35f, 50f);
+                Check("Excess juice spilled: output stays 20 L, 10 L lost", press.Juice == 20 && press.LastSpill == 10 && press.StoredGrapes == 0, $"juice {press.Juice}, spilled {press.LastSpill}");
+
+                // Spare buckets placed by the host.
+                var all = UnityEngine.Object.FindObjectsByType<WorldBucket>(FindObjectsSortMode.None);
+                Check("Host placed spare buckets next to the press and the fermenter", all.Length >= 2 && all.All(x => x.Amount == 0), $"{all.Length} ground buckets");
+                foreach (var x in all) Log($"   spare bucket at {x.transform.position}");
+                var spare = all.OrderBy(x => Vector3.Distance(x.transform.position, Center(pOut))).FirstOrDefault();
+                if (spare) Shot("t6b_spare_bucket", spare.transform.position + new Vector3(1.2f, 1.0f, 1.2f), spare.transform.position + Vector3.up * 0.2f, 55f);
+
+                // Collect 10 L, keep 7 L (so the two buckets are distinguishable), put it down.
+                foreach (var w in Click("Collect juice", pressOutSpot, pOut, true)) yield return w;
+                bucket.ServerRemove(ResourceType.GrapeJuice, 3);
+                yield return 0.2f;
+                Check("Setup: carrying 7 L juice, 10 L still in the press", bucket.Type == ResourceType.GrapeJuice && bucket.Amount == 7 && press.Juice == 10, $"{B()}, press {press.Juice}");
+                interactor.RequestDropBucket();
+                yield return 0.5f;
+                var dropped = UnityEngine.Object.FindObjectsByType<WorldBucket>(FindObjectsSortMode.None).FirstOrDefault(x => x.Amount == 7);
+                Check("B: bucket put down with its 7 L, hands free", !bucket.HasBucket && dropped != null, $"hasBucket={bucket.HasBucket}");
+                if (dropped) Shot("t6c_dropped_bucket", dropped.transform.position + new Vector3(1.1f, 1.0f, 1.1f), dropped.transform.position + Vector3.up * 0.2f, 55f);
+                foreach (var w in Click("Collect juice with empty hands", pressOutSpot, pOut, false)) yield return w;
+                Check("Machines explain that a bucket is needed", feedback.Any(f => f.Contains("No bucket")), string.Join(" | ", feedback));
+
+                // Pick up the spare, empty the press, then swap back.
+                if (spare)
+                {
+                    Vector3 sp = spare.transform.position;
+                    Vector3 standAt = sp + (pressOutSpot - sp).normalized * 1.3f; standAt.y = Ground(standAt);
+                    foreach (var w in Click("Pick up the spare bucket", standAt, spare.Find(InteractionPart.BucketPickup, 0), true)) yield return w;
+                    yield return 0.2f;
+                    Check("Spare picked up (empty), ground object removed", bucket.HasBucket && bucket.Amount == 0 && spare == null, $"{B()} spareAlive={spare != null}");
+                }
+                foreach (var w in Click("Collect the remaining juice", pressOutSpot, pOut, true)) yield return w;
+                Check("Press emptied into the spare bucket", bucket.Type == ResourceType.GrapeJuice && bucket.Amount == 10 && press.State == GrapePressController.PressState.Empty, $"{B()}, press {press.Juice} {press.State}");
+                if (dropped)
+                {
+                    Vector3 dp = dropped.transform.position;
+                    Vector3 standAt = dp + (pressOutSpot - dp).normalized * 1.3f; standAt.y = Ground(standAt);
+                    foreach (var w in Click("Swap with the dropped bucket", standAt, dropped.Find(InteractionPart.BucketPickup, 0), true)) yield return w;
+                    Check("Swap: carrying the 7 L bucket, 10 L bucket left on the ground", bucket.Amount == 7 && dropped != null && dropped.Amount == 10, $"{B()}, ground {(dropped ? dropped.Amount : -1)}");
+                }
+
+                // G: pour it all out.
+                interactor.RequestEmptyBucket();
+                yield return 0.55f;
+                PlayerShot("t6d_pouring_out_firstperson");
+                Check("G: pouring animation running, bucket emptied", bucket.IsPouring && bucket.Amount == 0, $"pour={bucket.PourProgress:F2} {B()}");
+                interactor.RequestInteract(pOut);
+                yield return 0.3f;
+                Check("No interaction while pouring", bucket.Amount == 0, B());
+                foreach (var w in Wait(() => !bucket.IsPouring, 3f)) yield return w;
+                Check("Pour finishes", !bucket.IsPouring && bucket.Type == ResourceType.Empty, B());
+            }
+
             // ---------------- Test 7: repeated production (two more full loops, other vines)
             Log("\n== Test 7 — Repeated production");
             for (int loop = 0; loop < 2; loop++)

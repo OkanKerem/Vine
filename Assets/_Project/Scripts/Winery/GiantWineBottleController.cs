@@ -90,7 +90,7 @@ namespace Vineyard.Winery
                 case InteractionPart.BottleFunnel:
                     if (wine >= capacity) return Blocked(title, Status, "Bottle Full", Fill);
                     if (bucket.Type != ResourceType.Wine)
-                        return Blocked(title, Status, bucket.Type == ResourceType.Empty ? "Bring wine in your bucket" : "Wrong Resource Type — only wine", Fill);
+                        return Blocked(title, Status, bucket.Type == ResourceType.Empty ? BringHint(bucket, "wine") : HoldsOther(bucket), Fill);
                     return Action(title, Status, $"Pour Wine Into Bottle — {bucket.Amount} L", Fill);
                 case InteractionPart.BottleTap:
                     return Blocked("Wine Tap", Status, "For the villagers — coming soon", Fill);
