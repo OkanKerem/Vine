@@ -1,0 +1,153 @@
+using System;
+using Mirror;
+using UnityEngine;
+using UnityEngine.InputSystem;
+using Vineyard.Player;
+
+namespace Vineyard.Winery
+{
+    /// <summary>
+    /// First-person interaction: centre-screen raycast, highlight + prompt, left click sends a request to the host.
+    ///
+    /// Flow: local click -> CmdInteract (station, part, index) -> host checks distance, rate limit and the
+    /// station's own rules -> station applies the transfer on the host -> SyncVars replicate to everyone ->
+    /// TargetFeedback tells the clicking player what happened.
+    /// The host cannot re-raycast (camera pitch is local-only), so it validates distance to the part instead.
+    /// </summary>
+    [RequireComponent(typeof(PlayerBucket))]
+    public class PlayerInteractor : NetworkBehaviour
+    {
+        [Header("Interaction")]
+        [Tooltip("Max distance from the camera to the aimed part (m).")]
+        public float maxDistance = 3f;
+        [Tooltip("Extra distance the host tolerates (latency, eye-height difference).")]
+        public float serverTolerance = 1.25f;
+        [Tooltip("Ignore Raycast (layer 2) is excluded so big outer frame colliders don't block inner parts.")]
+        public LayerMask raycastMask = ~(1 << 2);
+        [Tooltip("Minimum time between two requests from one player (host side, seconds).")]
+        public float serverMinInterval = 0.15f;
+
+        public static PlayerInteractor Local { get; private set; }
+
+        public WineryInteractable Current { get; private set; }
+        public InteractionPrompt CurrentPrompt { get; private set; }
+
+        /// <summary>(message, success) — raised on the owning client.</summary>
+        public event Action<string, bool> Feedback;
+        /// <summary>(world position, text) — floating "+8 Grapes".</summary>
+        public event Action<Vector3, string> FloatingText;
+
+        NetworkPlayer player;
+        PlayerBucket bucket;
+        bool wasLocked;
+        float nextClickTime;
+        double lastServerRequest;
+
+        public PlayerBucket Bucket => bucket;
+
+        void Awake()
+        {
+            player = GetComponent<NetworkPlayer>();
+            bucket = GetComponent<PlayerBucket>();
+        }
+
+        public override void OnStartLocalPlayer() => Local = this;
+
+        public override void OnStopLocalPlayer()
+        {
+            if (Local == this) Local = null;
+            SetCurrent(null);
+        }
+
+        void Update()
+        {
+            if (!isLocalPlayer) return;
+            Scan();
+
+            bool locked = Cursor.lockState == CursorLockMode.Locked;
+            var mouse = Mouse.current;
+            // 'wasLocked' skips the click that only re-captured the cursor.
+            if (locked && wasLocked && mouse != null && mouse.leftButton.wasPressedThisFrame && Time.unscaledTime >= nextClickTime)
+            {
+                nextClickTime = Time.unscaledTime + 0.2f;
+                TryInteract();
+            }
+            wasLocked = locked;
+        }
+
+        void Scan()
+        {
+            WineryInteractable hitTarget = null;
+            var cam = player != null ? player.playerCamera : null;
+            if (cam != null && cam.enabled)
+            {
+                Ray ray = cam.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+                if (Physics.Raycast(ray, out RaycastHit hit, maxDistance, raycastMask, QueryTriggerInteraction.Collide))
+                {
+                    var it = hit.collider.GetComponentInParent<WineryInteractable>();
+                    if (it != null && it.station != null && it.station.isActiveAndEnabled && it.station.netId != 0)
+                        hitTarget = it;
+                }
+            }
+            SetCurrent(hitTarget);
+            CurrentPrompt = Current != null ? Current.station.GetPrompt(Current, bucket) : default;
+        }
+
+        void SetCurrent(WineryInteractable it)
+        {
+            if (Current == it) return;
+            if (Current) Current.SetHighlighted(false);
+            Current = it;
+            if (Current) Current.SetHighlighted(true);
+        }
+
+        /// <summary>Interact with whatever is aimed at (also used by automated tests).</summary>
+        public void TryInteract()
+        {
+            if (Current == null) return;                    // clicking empty space / scenery does nothing
+            var prompt = Current.station.GetPrompt(Current, bucket);
+            if (!prompt.actionable)
+            {
+                Feedback?.Invoke(prompt.blockReason, false); // explain locally, no request
+                return;
+            }
+            CmdInteract(Current.station.netIdentity, Current.part, Current.index);
+        }
+
+        /// <summary>Send a request for a specific part without aiming (automated tests / future gamepad assist).</summary>
+        public void RequestInteract(WineryInteractable target)
+        {
+            if (target != null && target.station != null) CmdInteract(target.station.netIdentity, target.part, target.index);
+        }
+
+        // ------------------------------------------------------------------ host
+
+        [Command]
+        void CmdInteract(NetworkIdentity stationIdentity, InteractionPart part, int index)
+        {
+            if (NetworkTime.time - lastServerRequest < serverMinInterval) return;   // spam / duplicate clicks
+            lastServerRequest = NetworkTime.time;
+
+            if (stationIdentity == null || !stationIdentity.TryGetComponent(out WineryStation station)) return;
+            var target = station.Find(part, index);
+            if (target == null) return;
+
+            Vector3 eye = transform.position + Vector3.up * 1.65f;
+            if (station.DistanceTo(part, index, eye) > maxDistance + serverTolerance)
+            {
+                TargetFeedback("Out of Range", false, null, Vector3.zero);
+                return;
+            }
+
+            string msg = station.ServerInteract(target, bucket, out bool ok, out string floatText);
+            TargetFeedback(msg, ok, floatText, target.FeedbackPoint);
+        }
+
+        [TargetRpc]
+        void TargetFeedback(string message, bool success, string floatText, Vector3 position)
+        {
+            if (!string.IsNullOrEmpty(message)) Feedback?.Invoke(message, success);
+            if (!string.IsNullOrEmpty(floatText)) FloatingText?.Invoke(position, floatText);
+        }
+    }
+}

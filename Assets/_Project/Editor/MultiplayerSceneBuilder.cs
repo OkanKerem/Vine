@@ -43,6 +43,7 @@ namespace Vineyard.EditorTools
             var visorMat = CreateMaterial("Visor", new Color(0.1f, 0.1f, 0.12f));
 
             GameObject playerPrefab = BuildPlayerPrefab(playerMat, visorMat);
+            WinerySetup.SetupPlayerPrefab();   // bucket inventory, interaction and HUD
             BuildScene(playerPrefab, groundMat, obstacleMat);
 
             Debug.Log($"[Vineyard] Built {ScenePath} and {PlayerPrefabPath}. Press Play and click 'Host Game'.");

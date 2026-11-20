@@ -3,13 +3,9 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using Mirror;
-using Unity.AI.Navigation;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
-using UnityEngine.AI;
-using UnityEngine.Rendering;
-using UnityEngine.Rendering.Universal;
 using UnityEngine.SceneManagement;
 using Vineyard.Networking;
 using Vineyard.UI;
@@ -19,21 +15,23 @@ namespace Vineyard.EditorTools
     /// <summary>
     /// Tools > Vineyard > Build Village Scene
     ///
-    /// Assembles Assets/_Project/Scenes/Village.unity from existing assets:
-    ///  - OccaSoftware Low Poly Fantasy Village (houses, fences, trees, rocks, lanterns, benches...)
-    ///  - GiantWineTank.fbx, GrapeVine.fbx
-    ///  - The NetworkManager from MultiplayerTest.unity (copied into a reusable prefab)
-    /// Ground is a generated Terrain painted with grass / dirt roads / cobbled square.
+    /// Builds Assets/_Project/Scenes/Village.unity from the project's existing assets:
+    ///   OccaSoftware Low Poly Fantasy Village (houses, bridge, cliffs, mountains, rocks, trees, flowers,
+    ///   path stones, fences, lanterns, benches, crates, boat), GiantWineTank.fbx, Grapevine 1.fbx,
+    ///   GrapeBunch.fbx, SmallGrapePress.fbx, SmallFermentationStation.fbx and the existing NetworkManager prefab.
     ///
-    /// Layout (metres, +Z = north). Play area ~80 x 80 centred on the origin:
-    ///   Village square  : centre (0, 10), r = 12, giant bottle in the middle, houses around it
-    ///   Production area : x -12..12, z -18..-5 (between the square and the vineyard)
-    ///   Vineyard        : x -10..10, z -38.5..-19, 4 rows x 4 vines, fenced, north entrance
+    /// Layout (metres, +X = east, +Z = north):
+    ///   Village square    centre (0, 4), irregular cobbled plaza, giant bottle in the middle
+    ///                     (funnel faces south to the production courtyard, tap faces north to the tavern)
+    ///   Production yard   centre (-6, -14): winery building, press, fermenter, 2 reserved expansion slots
+    ///   Vineyard          x -24..-4, z -39..-24.5: 5 north-south rows x 4 vines, gate toward the press
+    ///   Residential       streets north / north-west / west, east hamlet across the stream (stone bridge)
+    ///   Countryside       stream + pond (south-east), hills, forests, cliffs, distant mountains
     ///
-    /// Writes a verification report to Logs/VillageBuildReport.txt.
-    /// Re-running overwrites the scene and the generated assets (not the imported packs).
+    /// Re-running regenerates the scene and everything under Assets/_Project/Generated/Village.
+    /// A verification report is written to Logs/VillageBuildReport.txt.
     /// </summary>
-    public static class VillageSceneBuilder
+    public static partial class VillageSceneBuilder
     {
         // ------------------------------------------------------------------ paths
         const string ScenePath = "Assets/_Project/Scenes/Village.unity";
@@ -42,43 +40,112 @@ namespace Vineyard.EditorTools
         const string PlayerPrefabPath = "Assets/_Project/Prefabs/NetworkPlayer.prefab";
         const string MultiplayerScenePath = "Assets/_Project/Scenes/MultiplayerTest.unity";
         const string Pack = "Assets/OccaSoftware/Low Poly Fantasy Village/Prefabs/";
+        const string PackMaterial = "Assets/OccaSoftware/Low Poly Fantasy Village/Materials/Color.mat";
         const string TankPath = "Assets/GiantWineTank.fbx";
-        const string VinePath = "Assets/GrapeVine.fbx";
+        const string VinePath = "Assets/Grapevine.fbx";
+        const string BunchPath = "Assets/GrapeBunch.fbx";
+        const string PressPath = "Assets/SmallGrapePress.fbx";
+        const string FermenterPath = "Assets/SmallFermentationStation.fbx";
         const string ReportPath = "Logs/VillageBuildReport.txt";
 
+        // ------------------------------------------------------------------ terrain
+        const float TerrainSize = 256f;      // centred on the origin
+        const float TerrainBaseY = -6f;      // world y of height 0
+        const float TerrainHeight = 60f;
+        const int HeightRes = 513;           // 0.5 m
+        const int FieldRes = 1025;           // 0.25 m distance fields
+        const int AlphaRes = 1024;
+        const int DetailRes = 512;
+
+        static readonly Rect PlayBounds = Rect.MinMaxRect(-53f, -47f, 53f, 49f);
+
         // ------------------------------------------------------------------ layout
-        static readonly Vector3 SquareCenter = new Vector3(0f, 0f, 10f);
-        const float SquareRadius = 12f;
-        static readonly Rect ProductionRect = Rect.MinMaxRect(-12f, -18f, 12f, -5f);   // x/z
-        static readonly Rect VineyardRect = Rect.MinMaxRect(-10f, -38.5f, 10f, -19f);
-        const float PlayHalfExtent = 45f;   // invisible walls
-        const float TerrainSize = 160f;
+        static readonly Vector2 SquareC = new Vector2(0f, 4f);
+        static float PlazaRadius(float ang) => 12.5f + 1.5f * Mathf.Sin(2f * ang + 0.5f) + 1.0f * Mathf.Sin(3f * ang + 2.1f);
 
-        /// <summary>
-        /// Yaw added to houses after turning their local +Z toward the square.
-        /// If house doors face away from the square, set this to 180 and rebuild.
-        /// </summary>
-        const float HouseFrontYawOffset = 0f;
+        static readonly Vector2 CourtC = new Vector2(-6f, -14f);
+        const float CourtRx = 11f, CourtRz = 7.5f;
+        static readonly Vector2 PressPos = new Vector2(-8f, -19f);
+        static readonly Vector2 FermenterPos = new Vector2(-1f, -13f);
+        static readonly Vector2[] ExpansionSlots = { new Vector2(-8.5f, -9.5f), new Vector2(3.5f, -18.5f) };
 
-        struct Road { public Vector2 a, b; public float width; public string name; }
+        static readonly Rect VineyardRect = Rect.MinMaxRect(-24f, -39f, -4f, -24.5f);
+        static readonly float[] RowX = { -20.8f, -17.4f, -14.0f, -10.6f, -7.2f };
+        static readonly float[] VineZ = { -28.2f, -30.32f, -32.44f, -34.56f };   // 2.12 m pitch for the 2.10 m vine
+        const float VineyardGateX0 = -11.8f, VineyardGateX1 = -5.9f;    // north gate (toward the press)
+        const float VineyardWestGapZ0 = -30.5f, VineyardWestGapZ1 = -26.8f;
+
+        static readonly Vector2 PondC = new Vector2(36f, -36f);
+        const float PondExtra = 5f;
+        static readonly Vector2[] StreamCtrl =
+        {
+            new Vector2(44f, 128f), new Vector2(40f, 100f), new Vector2(35f, 75f), new Vector2(31f, 55f),
+            new Vector2(29f, 40f), new Vector2(27.5f, 24f), new Vector2(29.4f, 6.5f), new Vector2(28f, -8f),
+            new Vector2(30.5f, -22f), new Vector2(36f, -36f), new Vector2(43f, -50f), new Vector2(52f, -72f),
+            new Vector2(64f, -100f), new Vector2(78f, -130f),
+        };
+        static readonly Vector2 BridgeHint = new Vector2(29.4f, 6.5f);
+
+        class Road
+        {
+            public string name; public Vector2[] ctrl; public float width; public bool canCobble; public bool lanterns = true;
+            public List<Vector2> pts;
+        }
+
         static readonly Road[] Roads =
         {
-            new Road { name = "Road_Main_SquareToVineyard", a = new Vector2(0f, -1f),  b = new Vector2(0f, -20f),  width = 5f },
-            new Road { name = "Road_VineyardHeadland",      a = new Vector2(-9f, -21f), b = new Vector2(9f, -21f),  width = 3f },
-            new Road { name = "Road_East",                  a = new Vector2(13f, 8f),   b = new Vector2(48f, 4f),   width = 4f },
-            new Road { name = "Road_West",                  a = new Vector2(-13f, 8f),  b = new Vector2(-48f, 6f),  width = 4f },
-            new Road { name = "Road_FarmPath_A",            a = new Vector2(-2f, -16.5f), b = new Vector2(-17f, -16.5f), width = 3f },
-            new Road { name = "Road_FarmPath_B",            a = new Vector2(-17f, -16.5f), b = new Vector2(-17f, -24f),  width = 3f },
+            new Road { name = "Street_North",          width = 3.6f, canCobble = true,  ctrl = new[] { V(2f, 14f), V(5f, 20f), V(7.5f, 26f), V(7f, 32f), V(4f, 37f) } },
+            new Road { name = "Street_NorthWest",      width = 3.4f, canCobble = true,  ctrl = new[] { V(-8.5f, 12.5f), V(-16f, 16.5f), V(-23f, 22f), V(-28f, 29f), V(-31f, 37f) } },
+            new Road { name = "Road_East",             width = 4.0f, canCobble = true,  ctrl = new[] { V(11f, 5f), V(20f, 6f), V(29.4f, 6.5f), V(38f, 8f), V(46f, 9.5f), V(58f, 11f) } },
+            new Road { name = "Road_West",             width = 4.0f, canCobble = true,  ctrl = new[] { V(-12f, 5f), V(-20f, 7f), V(-30f, 9.5f), V(-40f, 12.5f), V(-50f, 15f), V(-62f, 17f) } },
+            new Road { name = "Lane_SquareToYard",     width = 5.0f, canCobble = true,  lanterns = false, ctrl = new[] { V(-0.5f, -6f), V(-2.5f, -10.5f) } },
+            new Road { name = "Lane_YardToVineyard",   width = 3.2f, canCobble = false, lanterns = false, ctrl = new[] { V(-8.5f, -20.5f), V(-8.9f, -24.5f), V(-8.9f, -26.2f) } },
+            new Road { name = "Lane_VineyardHeadland", width = 2.4f, canCobble = false, lanterns = false, ctrl = new[] { V(-4.6f, -25.9f), V(-14f, -25.9f), V(-23.4f, -25.9f) } },
+            new Road { name = "Lane_Farm",             width = 3.0f, canCobble = false, ctrl = new[] { V(-30f, 9.5f), V(-31.5f, -3f), V(-31.2f, -14f), V(-30f, -23f), V(-26.5f, -28.6f), V(-23.4f, -28.6f) } },
+            new Road { name = "Lane_EastHamlet",       width = 3.0f, canCobble = false, ctrl = new[] { V(38f, 8f), V(38.5f, -2f), V(39f, -14f), V(40.5f, -24f) } },
+            new Road { name = "Lane_NorthEast",        width = 2.8f, canCobble = false, ctrl = new[] { V(7.5f, 26f), V(12.5f, 28.5f), V(16.5f, 30.5f) } },
+            new Road { name = "Path_StreamWalk",       width = 2.0f, canCobble = false, ctrl = new[] { V(22.5f, 5.5f), V(22.5f, -6f), V(23.3f, -17f), V(26.5f, -26.5f), V(29.5f, -30.5f) } },
         };
-        const float RingRoadInner = SquareRadius, RingRoadOuter = SquareRadius + 3.5f;
 
+        struct HouseDef
+        {
+            public string id, prefab, role; public Vector2 pos; public Vector2 faceTo; public float scale; public bool mirror; public float fixedYaw;
+            public bool garden;
+        }
+
+        static readonly HouseDef[] HouseDefs =
+        {
+            new HouseDef { id = "Tavern",          prefab = "House_3", pos = V(-6f, 25f),   faceTo = V(-3f, 10f),  scale = 1.0f,  role = "VillageCenter" },
+            new HouseDef { id = "House_NorthEast", prefab = "House_2", pos = V(17f, 21f),   faceTo = V(6f, 12f),   scale = 0.85f, garden = true },
+            new HouseDef { id = "House_SouthEast", prefab = "House_1", pos = V(12.5f, -13.5f), faceTo = V(4f, -4f),  scale = 0.85f, mirror = true },
+            new HouseDef { id = "House_NorthWest", prefab = "House_3", pos = V(-35.5f, 21f), faceTo = V(-24f, 20f), scale = 0.85f, mirror = true },
+            new HouseDef { id = "House_West",      prefab = "House_1", pos = V(-41.5f, -3f), faceTo = V(-34f, 8f),  scale = 0.85f },
+            new HouseDef { id = "House_FarWest",   prefab = "House_2", pos = V(-45.5f, 33.5f), faceTo = V(-36f, 26f), scale = 0.8f, mirror = true },
+            new HouseDef { id = "House_Hilltop",   prefab = "House_1", pos = V(-3f, 41.5f), faceTo = V(5f, 35f),   scale = 0.8f, mirror = true },
+            new HouseDef { id = "House_NorthLane", prefab = "House_3", pos = V(18f, 39.5f), faceTo = V(10f, 30f),  scale = 0.8f },
+            new HouseDef { id = "Hamlet_Mill",     prefab = "House_3", pos = V(43f, 20f),   faceTo = V(32f, 8f),   scale = 0.85f, garden = true },
+            new HouseDef { id = "Hamlet_Cottage",  prefab = "House_2", pos = V(47f, -9.5f), faceTo = V(38f, -5f),  scale = 0.75f },
+            new HouseDef { id = "Farmhouse",       prefab = "House_2", pos = V(-38f, -20f), faceTo = V(-28f, -20f), scale = 0.8f },
+            new HouseDef { id = "WineryHall",      prefab = "House_1", pos = V(-20.5f, -15f), faceTo = V(0f, -15f), scale = 0.95f, role = "Production" },
+        };
+
+        static readonly Vector2[] SpawnCandidates = { V(9f, 1.5f), V(10.3f, 4.6f), V(9.2f, 7.8f), V(6.8f, 10.2f) };
+
+        static Vector2 V(float x, float z) => new Vector2(x, z);
+
+        // ------------------------------------------------------------------ build state
         static StringBuilder report;
         static int warnings;
+        static Terrain terrain;
+        static System.Random rng;
+        static readonly Dictionary<string, GameObject> prefabCache = new Dictionary<string, GameObject>();
+        static readonly List<string> missing = new List<string>();
+        static readonly HashSet<string> usedAssets = new HashSet<string>();
 
         // ================================================================== entry
 
         [MenuItem("Tools/Vineyard/Build Village Scene")]
-        public static void Build()
+        public static void BuildMenu()
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode)
             {
@@ -86,82 +153,150 @@ namespace Vineyard.EditorTools
                 return;
             }
             if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
+            Build();
+        }
 
+        /// <summary>Non-interactive entry point (also used by automation).</summary>
+        public static string Build()
+        {
             report = new StringBuilder();
             warnings = 0;
+            rng = new System.Random(20261120);
+            prefabCache.Clear(); missing.Clear(); usedAssets.Clear();
+            blockers.Clear(); lanternSpots.Clear(); localBoundsCache.Clear();
+            bridgeInfo = null; terrain = null; allHouses = new List<HouseInfo>();
             Log($"Village build {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            var sw = System.Diagnostics.Stopwatch.StartNew();
 
             try
             {
-                EditorUtility.DisplayProgressBar("Village", "Preparing assets", 0.05f);
+                Progress("Preparing assets", 0.02f);
                 EnsureFolder(GenDir);
-                EnsureFolder("Assets/_Project/Scenes");
-
-                // Grab the NetworkManager setup before we replace the open scene.
+                BackupExistingScene();
                 GameObject nmPrefab = GetOrCreateNetworkManagerPrefab();
+                AssetDatabase.DeleteAsset(GenDir + "/StationPad.mat"); // obsolete placeholder material
 
                 var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
 
+                // ---------------- hierarchy
                 var root = new GameObject("Village").transform;
                 var env = Child(root, "Environment");
-                var town = Child(root, "Town");
-                var vineyard = Child(root, "Vineyard");
-                var production = Child(root, "ProductionArea");
+                H.Terrain = Child(env, "Terrain");
+                H.Mountains = Child(env, "Mountains");
+                H.Cliffs = Child(env, "Cliffs");
+                H.Rocks = Child(env, "Rocks");
+                H.Vegetation = Child(env, "Vegetation");
+                H.Trees = Child(H.Vegetation, "Trees");
+                H.Flowers = Child(H.Vegetation, "Flowers");
+                H.Water = Child(env, "Water");
+                H.Bridges = Child(env, "Bridges");
+                H.Bounds = Child(env, "MapBounds");
+
+                var center = Child(root, "VillageCenter");
+                H.Square = Child(center, "VillageSquare");
+                H.CenterBuildings = Child(center, "Buildings");
+                H.CenterDecor = Child(center, "Decorations");
+
+                var res = Child(root, "ResidentialArea");
+                H.ResBuildings = Child(res, "Buildings");
+                H.Roads = Child(res, "Roads");
+                H.ResFences = Child(res, "Fences");
+                H.ResDecor = Child(res, "Decorations");
+
+                var vin = Child(root, "Vineyard");
+                H.GrapeRows = Child(vin, "GrapeRows");
+                H.Soil = Child(vin, "Soil");
+                H.VinFences = Child(vin, "Fences");
+                H.VinDecor = Child(vin, "Decorations");
+
+                var prod = Child(root, "ProductionArea");
+                H.Press = Child(prod, "CrushingPress");
+                H.Fermenter = Child(prod, "FermentationMachine");
+                H.Storage = Child(prod, "Storage");
+                H.ProdDecor = Child(prod, "Decorations");
+                H.ProdBuildings = Child(prod, "Buildings");
+                H.Expansion = Child(prod, "ExpansionSlots");
+
                 var lighting = Child(root, "Lighting");
                 var spawns = Child(root, "PlayerSpawns");
+                H.Networking = Child(root, "Networking");
 
-                EditorUtility.DisplayProgressBar("Village", "Terrain", 0.15f);
-                BuildTerrain(Child(env, "Terrain"));
-                BuildRoadMarkers(Child(env, "Roads"));
-                BuildMapBounds(Child(env, "MapBounds"));
+                // ---------------- layout + terrain
+                Progress("Layout", 0.08f);
+                PrepareRoads();
+                PrepareStream();
+                var houses = PrepareHouses();          // instantiated now so the terrain can be shaped around them
+                allHouses = houses;
+                var bridge = PrepareBridge();          // ditto (bank heights)
+                bridgeInfo = bridge;
 
-                EditorUtility.DisplayProgressBar("Village", "Giant wine bottle", 0.3f);
-                var bottle = BuildBottle(root, out Vector3 inputAccess, out Vector3 outputAccess);
+                Progress("Terrain heights", 0.15f);
+                BuildDistanceFields();
+                BuildTerrain(houses, bridge);
 
-                EditorUtility.DisplayProgressBar("Village", "Town", 0.4f);
-                var buildings = Child(town, "Buildings");
-                var square = Child(town, "VillageSquare");
-                var placedFootprints = new List<Rect>();
-                placedFootprints.Add(FootprintOf(bottle, 2f)); // keep houses away from the bottle
-                BuildHouses(buildings, placedFootprints);
-                BuildSquareProps(square, placedFootprints);
+                Progress("Buildings", 0.35f);
+                SettleHouses(houses);
 
-                EditorUtility.DisplayProgressBar("Village", "Vineyard", 0.55f);
-                var aisles = BuildVineyard(Child(vineyard, "GrapeRows"));
-                BuildFences(Child(env, "Fences"));
+                Progress("Giant wine bottle", 0.4f);
+                var bottle = BuildBottle(center, out Vector3 inputAccess, out Vector3 outputAccess);
 
-                EditorUtility.DisplayProgressBar("Village", "Production area", 0.6f);
-                var stationPoints = BuildProductionArea(production);
+                Progress("Village square", 0.45f);
+                BuildSquare(houses);
 
-                EditorUtility.DisplayProgressBar("Village", "Nature", 0.65f);
-                BuildNature(Child(env, "Nature"), placedFootprints);
+                Progress("Production area", 0.5f);
+                var stations = BuildProduction();
 
-                EditorUtility.DisplayProgressBar("Village", "Lighting", 0.7f);
+                Progress("Vineyard", 0.55f);
+                var aisles = BuildVineyard();
+
+                Progress("Streets & houses", 0.6f);
+                DressRoads(houses);
+                DressHouses(houses);
+                DressFields();
+                RetainingStones(houses);
+
+                Progress("Water & bridge", 0.65f);
+                BuildWater();
+                DressStream(bridge);
+
+                Progress("Nature", 0.7f);
+                BuildNature(houses);
+                BuildMountains();
+                BuildMapBounds();
+
+                Progress("Lighting", 0.78f);
                 BuildLighting(lighting);
                 BuildMenuCamera(root);
 
                 var spawnPoints = BuildSpawns(spawns);
 
-                // Networking (root object: NetworkManager uses DontDestroyOnLoad, which needs a root).
                 if (nmPrefab != null)
                 {
+                    // Must stay a root object: NetworkManager uses DontDestroyOnLoad.
                     var nm = (GameObject)PrefabUtility.InstantiatePrefab(nmPrefab, scene);
                     nm.name = "NetworkManager";
-                    Log($"NetworkManager: prefab instance of {NetworkManagerPrefabPath}");
+                    var note = new GameObject("NetworkManager is a scene-root object (DontDestroyOnLoad)");
+                    note.transform.SetParent(H.Networking, false);
+                    Log($"NetworkManager: prefab instance of {NetworkManagerPrefabPath} at scene root.");
                 }
 
-                // Static flags for environment (not spawns / network / lighting).
-                foreach (var t in new[] { env, town, vineyard, production, bottle.transform })
+                Progress("Static flags", 0.82f);
+                foreach (var t in new[] { env, H.Square, H.CenterBuildings, H.CenterDecor, res, H.Soil, H.VinFences, H.VinDecor,
+                                          H.Storage, H.ProdDecor, H.ProdBuildings, H.Expansion })
                     SetStaticRecursive(t.gameObject);
 
-                EditorUtility.DisplayProgressBar("Village", "Verification + NavMesh", 0.8f);
+                Progress("Verification + NavMesh", 0.86f);
                 Physics.SyncTransforms();
-                Verify(root, spawnPoints, inputAccess, outputAccess, stationPoints, aisles);
+                Verify(root, houses, spawnPoints, inputAccess, outputAccess, stations, aisles, bridge);
+
+                // Production loop (stations, interactables, effects) — kept in WinerySetup so it can also run on its own.
+                Log("Winery gameplay: " + WinerySetup.SetupScene());
 
                 EditorSceneManager.MarkSceneDirty(scene);
                 EditorSceneManager.SaveScene(scene, ScenePath);
                 AddSceneToBuildSettingsFirst(ScenePath);
                 Log($"Saved {ScenePath} (build index 0).");
+                LogAssetsUsed(root);
             }
             catch (System.Exception e)
             {
@@ -171,11 +306,34 @@ namespace Vineyard.EditorTools
             finally
             {
                 EditorUtility.ClearProgressBar();
-                Log($"Done with {warnings} warning(s).");
+                Log($"Done in {sw.Elapsed.TotalSeconds:F1} s with {warnings} warning(s).");
                 Directory.CreateDirectory("Logs");
                 File.WriteAllText(ReportPath, report.ToString());
-                Debug.Log($"[Village] Build finished with {warnings} warning(s). Report: {Path.GetFullPath(ReportPath)}\n{report}");
+                Debug.Log($"[Village] Build finished with {warnings} warning(s). Report: {Path.GetFullPath(ReportPath)}");
             }
+            return $"{warnings} warnings";
+        }
+
+        static class H
+        {
+            public static Transform Terrain, Mountains, Cliffs, Rocks, Vegetation, Trees, Flowers, Water, Bridges, Bounds;
+            public static Transform Square, CenterBuildings, CenterDecor;
+            public static Transform ResBuildings, Roads, ResFences, ResDecor;
+            public static Transform GrapeRows, Soil, VinFences, VinDecor;
+            public static Transform Press, Fermenter, Storage, ProdDecor, ProdBuildings, Expansion;
+            public static Transform Networking;
+        }
+
+        static void Progress(string what, float t) => EditorUtility.DisplayProgressBar("Village", what, t);
+
+        static void BackupExistingScene()
+        {
+            if (!File.Exists(ScenePath)) return;
+            string dir = "Assets/_Project/Scenes/Backups";
+            EnsureFolder(dir);
+            string dst = $"{dir}/Village_BeforeRebuild_{System.DateTime.Now:yyyyMMdd_HHmmss}.unity";
+            AssetDatabase.CopyAsset(ScenePath, dst);
+            Log($"Backup of the previous scene file: {dst}");
         }
 
         // ================================================================== networking
@@ -185,7 +343,7 @@ namespace Vineyard.EditorTools
             var existing = AssetDatabase.LoadAssetAtPath<GameObject>(NetworkManagerPrefabPath);
             if (existing != null && existing.GetComponent<NetworkManager>() != null)
             {
-                Log("Reusing existing NetworkManager prefab.");
+                Log("Reusing existing NetworkManager prefab (not modified).");
                 return existing;
             }
 
@@ -215,967 +373,648 @@ namespace Vineyard.EditorTools
                 Warn("No NetworkManager found in MultiplayerTest.unity, creating one with the default setup.");
                 temp = new GameObject("NetworkManager");
                 var manager = temp.AddComponent<GameNetworkManager>();
-                var transport = temp.AddComponent<kcp2k.KcpTransport>(); // transport choice lives only in setup code
+                var transport = temp.AddComponent<kcp2k.KcpTransport>();
                 temp.AddComponent<ConnectionUI>();
                 manager.transport = transport;
                 manager.playerPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PlayerPrefabPath);
                 manager.playerSpawnMethod = PlayerSpawnMethod.RoundRobin;
                 manager.maxConnections = GameNetworkManager.MaxPlayers;
-                if (manager.playerPrefab == null) Warn($"Player prefab missing at {PlayerPrefabPath}. Run Tools > Vineyard > Build Multiplayer Test Scene.");
             }
-
             var prefab = PrefabUtility.SaveAsPrefabAsset(temp, NetworkManagerPrefabPath);
             Object.DestroyImmediate(temp);
             if (openedMp) EditorSceneManager.CloseScene(mpScene, true);
             return prefab;
         }
 
+        // ================================================================== layout preparation
+
+        static List<Vector2> streamPts;     // resampled, north -> south
+        static float[] streamRef;           // reference (bank) height along the stream, non-increasing downstream
+
+        static void PrepareRoads()
+        {
+            foreach (var r in Roads) r.pts = CatmullRom(r.ctrl, 0.75f);
+        }
+
+        static void PrepareStream()
+        {
+            streamPts = CatmullRom(StreamCtrl, 1f);
+            int n = streamPts.Count;
+            var raw = new float[n];
+            for (int i = 0; i < n; i++) raw[i] = BaseHeight(streamPts[i].x, streamPts[i].y);
+            streamRef = new float[n];
+            for (int i = 0; i < n; i++)
+            {
+                float s = 0; int c = 0;
+                for (int k = -6; k <= 6; k++) { int j = Mathf.Clamp(i + k, 0, n - 1); s += raw[j]; c++; }
+                streamRef[i] = s / c;
+            }
+            for (int i = 1; i < n; i++) streamRef[i] = Mathf.Min(streamRef[i], streamRef[i - 1] - 0.005f);
+        }
+
         // ================================================================== terrain
 
-        static void BuildTerrain(Transform parent)
-        {
-            string texDir = GenDir + "/Textures";
-            EnsureFolder(texDir);
-            var grass = MakeTexture(texDir + "/Grass.png", (u, v) =>
-            {
-                float n = TileNoise(u, v, 6f) * 0.6f + TileNoise(u + 0.37f, v + 0.11f, 23f) * 0.4f;
-                return Color.Lerp(new Color(0.42f, 0.62f, 0.25f), new Color(0.52f, 0.70f, 0.30f), n);
-            });
-            var grassDark = MakeTexture(texDir + "/GrassDark.png", (u, v) =>
-            {
-                float n = TileNoise(u, v, 8f) * 0.7f + TileNoise(u + 0.5f, v, 31f) * 0.3f;
-                return Color.Lerp(new Color(0.30f, 0.48f, 0.20f), new Color(0.40f, 0.56f, 0.22f), n);
-            });
-            var dirt = MakeTexture(texDir + "/Dirt.png", (u, v) =>
-            {
-                float n = TileNoise(u, v, 7f) * 0.6f + TileNoise(u + 0.2f, v + 0.7f, 40f) * 0.4f;
-                var c = Color.Lerp(new Color(0.55f, 0.42f, 0.28f), new Color(0.66f, 0.52f, 0.36f), n);
-                if (TileNoise(u + 0.9f, v + 0.3f, 64f) > 0.78f) c *= 0.82f; // pebbles
-                return c;
-            });
-            var cobble = MakeTexture(texDir + "/Cobble.png", (u, v) =>
-            {
-                float edge = CellEdge(u, v, 7);
-                float n = TileNoise(u, v, 20f);
-                var stone = Color.Lerp(new Color(0.62f, 0.58f, 0.52f), new Color(0.74f, 0.70f, 0.63f), n);
-                return Color.Lerp(new Color(0.40f, 0.36f, 0.31f), stone, Mathf.SmoothStep(0f, 1f, edge * 6f));
-            });
+        static float Smooth01(float a, float b, float x) => Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(a, b, x));
 
-            var layers = new[]
+        static float Fbm(float x, float z)
+        {
+            float v = 0, amp = 0.5f, f = 1f;
+            for (int o = 0; o < 4; o++) { v += Mathf.PerlinNoise(x * f + o * 17.3f, z * f + o * 9.1f) * amp; f *= 2.03f; amp *= 0.5f; }
+            return v / 0.9375f;
+        }
+
+        /// <summary>Natural landform before any flattening / carving (world metres).</summary>
+        static float BaseHeight(float x, float z)
+        {
+            float h = (Mathf.PerlinNoise(x * 0.03f + 11.3f, z * 0.03f + 5.1f) - 0.5f) * 1.3f
+                    + (Mathf.PerlinNoise(x * 0.09f + 3.3f, z * 0.09f + 8.8f) - 0.5f) * 0.35f;
+            h += Smooth01(12f, 46f, z) * 2.8f;                                        // northern terrace
+            h += Smooth01(-12f, -48f, x) * 1.4f;                                      // western rise
+            h += Smooth01(-22f, -46f, z) * 2.0f * (1f - Smooth01(5f, 25f, x));       // south-west vineyard slope
+            h -= Smooth01(16f, 40f, x) * 0.5f;                                        // eastern meadow toward the stream
+
+            float ang = Mathf.Atan2(z, x);
+            float r = Mathf.Sqrt(x * x + z * z);
+            float warp = (Mathf.PerlinNoise(Mathf.Cos(ang) * 1.7f + 4f, Mathf.Sin(ang) * 1.7f + 2f) - 0.5f) * 26f;
+            float t = Smooth01(52f, 105f, r + warp);
+            float open = Mathf.Clamp01(Mathf.Cos(ang + 0.95f));                        // lower toward the south-east valley
+            float hills = (5f + 24f * Fbm(x * 0.011f + 20f, z * 0.011f + 40f)) * (1f - 0.6f * open);
+            hills += Mathf.Max(0f, Fbm(x * 0.035f + 3f, z * 0.035f + 7f) - 0.5f) * 14f;
+            return h + t * hills;
+        }
+
+        // distance fields (FieldRes x FieldRes, 0.25 m)
+        static float[] fRoadEdge;   // distance to the nearest road edge (negative inside)
+        static int[] fRoadId;
+        static float[] fStream;     // distance to stream centre line (pond-aware)
+        static float[] fStreamRef;  // reference height of the nearest stream point
+
+        static float FieldCell => TerrainSize / (FieldRes - 1);
+        static Vector2 FieldToWorld(int x, int z) => new Vector2(-TerrainSize / 2f + x * FieldCell, -TerrainSize / 2f + z * FieldCell);
+
+        static float SampleField(float[] f, float x, float z)
+        {
+            int ix = Mathf.Clamp(Mathf.RoundToInt((x + TerrainSize / 2f) / FieldCell), 0, FieldRes - 1);
+            int iz = Mathf.Clamp(Mathf.RoundToInt((z + TerrainSize / 2f) / FieldCell), 0, FieldRes - 1);
+            return f[iz * FieldRes + ix];
+        }
+        static int SampleFieldId(float x, float z)
+        {
+            int ix = Mathf.Clamp(Mathf.RoundToInt((x + TerrainSize / 2f) / FieldCell), 0, FieldRes - 1);
+            int iz = Mathf.Clamp(Mathf.RoundToInt((z + TerrainSize / 2f) / FieldCell), 0, FieldRes - 1);
+            return fRoadId[iz * FieldRes + ix];
+        }
+
+        static void BuildDistanceFields()
+        {
+            int n = FieldRes * FieldRes;
+            fRoadEdge = Enumerable.Repeat(999f, n).ToArray();
+            fRoadId = Enumerable.Repeat(-1, n).ToArray();
+            fStream = Enumerable.Repeat(999f, n).ToArray();
+            fStreamRef = new float[n];
+
+            for (int ri = 0; ri < Roads.Length; ri++)
+                Stamp(Roads[ri].pts, 10f, Roads[ri].width / 2f, fRoadEdge, null, null, fRoadId, ri);
+            Stamp(streamPts, 40f, 0f, fStream, fStreamRef, streamRef, null, 0);
+
+            // Pond: a widening of the stream, shares the reference height of the stream at its centre.
+            int pi = NearestIndex(streamPts, PondC);
+            float pr = streamRef[pi];
+            float R = 26f;
+            ForCells(PondC - Vector2.one * R, PondC + Vector2.one * R, (k, p) =>
             {
-                MakeLayer("Grass", grass, 8f),
-                MakeLayer("GrassDark", grassDark, 10f),
-                MakeLayer("Dirt", dirt, 5f),
-                MakeLayer("Cobble", cobble, 4f),
-            };
+                float d = Mathf.Max(0f, Vector2.Distance(p, PondC) - PondExtra * (0.85f + 0.3f * Mathf.PerlinNoise(p.x * 0.2f, p.y * 0.2f)));
+                if (d < fStream[k]) { fStream[k] = d; fStreamRef[k] = pr; }
+            });
+        }
+
+        static void Stamp(List<Vector2> pts, float radius, float sub, float[] dist, float[] aux, float[] auxVals, int[] ids, int id)
+        {
+            for (int i = 0; i < pts.Count - 1; i++)
+            {
+                Vector2 a = pts[i], b = pts[i + 1];
+                var min = Vector2.Min(a, b) - Vector2.one * radius;
+                var max = Vector2.Max(a, b) + Vector2.one * radius;
+                ForCells(min, max, (k, p) =>
+                {
+                    float d = DistToSegment(p, a, b, out float t) - sub;
+                    if (d < dist[k])
+                    {
+                        dist[k] = d;
+                        if (aux != null) aux[k] = Mathf.Lerp(auxVals[i], auxVals[i + 1], t);
+                        if (ids != null) ids[k] = id;
+                    }
+                });
+            }
+        }
+
+        static void ForCells(Vector2 min, Vector2 max, System.Action<int, Vector2> f)
+        {
+            int x0 = Mathf.Clamp(Mathf.FloorToInt((min.x + TerrainSize / 2f) / FieldCell), 0, FieldRes - 1);
+            int x1 = Mathf.Clamp(Mathf.CeilToInt((max.x + TerrainSize / 2f) / FieldCell), 0, FieldRes - 1);
+            int z0 = Mathf.Clamp(Mathf.FloorToInt((min.y + TerrainSize / 2f) / FieldCell), 0, FieldRes - 1);
+            int z1 = Mathf.Clamp(Mathf.CeilToInt((max.y + TerrainSize / 2f) / FieldCell), 0, FieldRes - 1);
+            for (int z = z0; z <= z1; z++)
+                for (int x = x0; x <= x1; x++)
+                    f(z * FieldRes + x, FieldToWorld(x, z));
+        }
+
+        static float RoadEdge(float x, float z) => SampleField(fRoadEdge, x, z);
+        static float StreamDist(float x, float z) => SampleField(fStream, x, z);
+
+        static float PlazaSignedDist(Vector2 p)
+        {
+            Vector2 d = p - SquareC;
+            return d.magnitude - PlazaRadius(Mathf.Atan2(d.y, d.x));
+        }
+        static float CourtEllipse(Vector2 p)
+        {
+            Vector2 d = p - CourtC;
+            return Mathf.Sqrt((d.x / CourtRx) * (d.x / CourtRx) + (d.y / CourtRz) * (d.y / CourtRz));
+        }
+
+        /// <summary>Stream bank profile relative to the reference height: bed, bank, then valley walls.</summary>
+        static float StreamProfile(float d)
+        {
+            if (d < 1.6f) return -1.8f;
+            if (d < 4.4f) return -1.8f + 1.8f * Mathf.SmoothStep(0f, 1f, (d - 1.6f) / 2.8f);
+            return (d - 4.4f) * 0.5f;
+        }
+
+        static float plazaH, courtH;
+
+        static float FinalHeight(float x, float z, List<HouseInfo> houses, BridgeInfo bridge)
+        {
+            var p = new Vector2(x, z);
+            float h = BaseHeight(x, z);
+
+            // Square and production yard: flat, with soft edges.
+            float pm = 1f - Smooth01(-0.5f, 6f, PlazaSignedDist(p));
+            h = Mathf.Lerp(h, plazaH, pm);
+            float cm = 1f - Smooth01(1.0f, 1.6f, CourtEllipse(p));
+            h = Mathf.Lerp(h, courtH, cm);
+
+            // Building pads.
+            foreach (var hs in houses)
+            {
+                float d = hs.ObbDistance(p);
+                if (d > 6f) continue;
+                h = Mathf.Lerp(h, hs.padHeight, 1f - Smooth01(0.6f, 5f, d));
+            }
+
+            // Roads: soften bumps a little (follow a smoothed version of the ground).
+            float re = RoadEdge(x, z);
+            if (re < 1.5f)
+            {
+                float hs = (BaseHeight(x + 1.5f, z) + BaseHeight(x - 1.5f, z) + BaseHeight(x, z + 1.5f) + BaseHeight(x, z - 1.5f)) * 0.25f;
+                float w = (1f - Smooth01(-0.5f, 1.5f, re)) * 0.6f * (1f - pm) * (1f - cm);
+                h = Mathf.Lerp(h, hs, w);
+            }
+
+            // Bridge abutments: ground meets the deck ends.
+            if (bridge != null)
+            {
+                foreach (var e in bridge.ends)
+                {
+                    float d = Vector2.Distance(p, e.xz);
+                    if (d < 6f) h = Mathf.Lerp(h, e.height, 1f - Smooth01(1.8f, 6f, d));
+                }
+            }
+
+            // Stream channel and pond.
+            float sd = StreamDist(x, z);
+            if (sd < 40f)
+            {
+                float sref = SampleField(fStreamRef, x, z);
+                h = Mathf.Min(h, sref + StreamProfile(sd));
+            }
+            return h;
+        }
+
+        static TerrainLayer[] layers;
+        const int LGrass = 0, LGrassDark = 1, LMeadow = 2, LDirt = 3, LSoil = 4, LCobble = 5, LGravel = 6;
+
+        static void BuildTerrain(List<HouseInfo> houses, BridgeInfo bridge)
+        {
+            plazaH = BaseHeight(SquareC.x, SquareC.y);
+            courtH = Mathf.Lerp(BaseHeight(CourtC.x, CourtC.y), plazaH, 0.5f);
+
+            layers = BuildTerrainLayers();
+            // All texture imports must happen before the terrain is filled: an import reloads the TerrainData asset
+            // from disk and silently discards unsaved heights / splat.
+            grassTuftTex = MakeGrassTuftTexture(GenDir + "/Textures/GrassTuft.png");
 
             string dataPath = GenDir + "/VillageTerrainData.asset";
             AssetDatabase.DeleteAsset(dataPath);
-            var data = new TerrainData { heightmapResolution = 257, alphamapResolution = 256 };
-            data.size = new Vector3(TerrainSize, 20f, TerrainSize);
-            data.terrainLayers = layers;
+            var fresh = new TerrainData { heightmapResolution = HeightRes };
+            fresh.size = new Vector3(TerrainSize, TerrainHeight, TerrainSize);
+            fresh.alphamapResolution = AlphaRes;
+            fresh.baseMapResolution = 1024;
+            fresh.terrainLayers = layers;
+            // Persist the empty asset first and work on the persisted instance: data written into a TerrainData
+            // before / right after CreateAsset was being discarded (flat heights or all-grass splat textures).
+            AssetDatabase.CreateAsset(fresh, dataPath);
+            AssetDatabase.SaveAssets();
+            var data = AssetDatabase.LoadAssetAtPath<TerrainData>(dataPath);
 
-            // Heights: flat play area, gentle hills outside it as a natural backdrop.
-            int hr = data.heightmapResolution;
-            var heights = new float[hr, hr];
-            for (int z = 0; z < hr; z++)
-            for (int x = 0; x < hr; x++)
-            {
-                Vector2 w = TerrainToWorld(x, z, hr);
-                float r = Mathf.Max(Mathf.Abs(w.x), Mathf.Abs(w.y)) * 0.6f + w.magnitude * 0.4f;
-                float t = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(48f, 78f, r));
-                float hills = 4f + 8f * Mathf.PerlinNoise(w.x * 0.03f + 10f, w.y * 0.03f + 3f);
-                heights[z, x] = t * hills / data.size.y;
-            }
-            data.SetHeights(0, 0, heights);
-
-            // Splat map.
-            int ar = data.alphamapResolution;
-            var maps = new float[ar, ar, layers.Length];
-            for (int z = 0; z < ar; z++)
-            for (int x = 0; x < ar; x++)
-            {
-                Vector2 w = TerrainToWorld(x, z, ar);
-                float jitter = (Mathf.PerlinNoise(w.x * 0.35f, w.y * 0.35f) - 0.5f) * 0.9f;
-
-                float cob = 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(SquareRadius - 0.8f, SquareRadius + 0.4f, Vector2.Distance(w, XZ(SquareCenter)) + jitter));
-
-                float d = 0f;
-                foreach (var road in Roads)
-                {
-                    float dist = DistToSegment(w, road.a, road.b) + jitter;
-                    d = Mathf.Max(d, 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(road.width * 0.5f - 0.6f, road.width * 0.5f + 0.6f, dist)));
-                }
-                float sq = Vector2.Distance(w, XZ(SquareCenter)) + jitter;
-                if (sq > RingRoadInner - 1f && sq < RingRoadOuter + 1f)
-                    d = Mathf.Max(d, 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(RingRoadOuter - 0.6f, RingRoadOuter + 0.6f, sq)));
-                d = Mathf.Max(d, RectMask(w, ProductionRect, 1f, jitter));
-                d = Mathf.Max(d, RectMask(w, VineyardRect, 1f, jitter) * 0.85f);
-
-                float rest = Mathf.Clamp01(1f - cob);
-                float dirtW = Mathf.Min(d, rest);
-                rest -= dirtW;
-                float variation = Mathf.Clamp01(Mathf.PerlinNoise(w.x * 0.06f + 50f, w.y * 0.06f + 20f) * 1.3f - 0.35f);
-                maps[z, x, 0] = rest * (1f - variation);
-                maps[z, x, 1] = rest * variation;
-                maps[z, x, 2] = dirtW;
-                maps[z, x, 3] = cob;
-            }
-            data.SetAlphamaps(0, 0, maps);
-            AssetDatabase.CreateAsset(data, dataPath);
-
-            var terrainGo = Terrain.CreateTerrainGameObject(data);
-            terrainGo.name = "VillageTerrain";
-            terrainGo.transform.SetParent(parent, false);
-            terrainGo.transform.position = new Vector3(-TerrainSize / 2f, 0f, -TerrainSize / 2f);
-            var terrain = terrainGo.GetComponent<Terrain>();
+            var go = Terrain.CreateTerrainGameObject(data);
+            go.name = "VillageTerrain";
+            go.transform.SetParent(H.Terrain, false);
+            go.transform.position = new Vector3(-TerrainSize / 2f, TerrainBaseY, -TerrainSize / 2f);
+            terrain = go.GetComponent<Terrain>();
             terrain.drawInstanced = true;
-            terrain.basemapDistance = 200f;
-            Log($"Terrain: {TerrainSize}x{TerrainSize} m, flat play area, hills beyond ~48 m, TerrainCollider present: {terrainGo.GetComponent<TerrainCollider>() != null}");
-        }
+            terrain.basemapDistance = 160f;
+            terrain.heightmapPixelError = 3f;
+            terrain.detailObjectDistance = 75f;
+            terrain.detailObjectDensity = 1f;
+            terrain.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.TwoSided;
+            terrain.materialTemplate = TerrainMaterial();
 
-        static Vector2 TerrainToWorld(int x, int z, int res)
-        {
-            float fx = (x / (float)(res - 1)) * TerrainSize - TerrainSize / 2f;
-            float fz = (z / (float)(res - 1)) * TerrainSize - TerrainSize / 2f;
-            return new Vector2(fx, fz);
-        }
-
-        static float RectMask(Vector2 p, Rect r, float fade, float jitter)
-        {
-            float dx = Mathf.Max(r.xMin - p.x, 0f, p.x - r.xMax);
-            float dz = Mathf.Max(r.yMin - p.y, 0f, p.y - r.yMax);
-            float dist = Mathf.Sqrt(dx * dx + dz * dz) + jitter * 0.5f;
-            return 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0f, fade, dist));
-        }
-
-        static TerrainLayer MakeLayer(string name, Texture2D tex, float tile)
-        {
-            string path = $"{GenDir}/Layer_{name}.terrainlayer";
-            AssetDatabase.DeleteAsset(path);
-            var layer = new TerrainLayer { diffuseTexture = tex, tileSize = new Vector2(tile, tile), smoothness = 0f, metallic = 0f };
-            AssetDatabase.CreateAsset(layer, path);
-            return layer;
-        }
-
-        static Texture2D MakeTexture(string path, System.Func<float, float, Color> fn, int size = 256)
-        {
-            var tex = new Texture2D(size, size, TextureFormat.RGB24, false);
-            var px = new Color[size * size];
-            for (int y = 0; y < size; y++)
-            for (int x = 0; x < size; x++)
-                px[y * size + x] = fn(x / (float)size, y / (float)size);
-            tex.SetPixels(px);
-            File.WriteAllBytes(path, tex.EncodeToPNG());
-            Object.DestroyImmediate(tex);
-            AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
-            var importer = (TextureImporter)AssetImporter.GetAtPath(path);
-            importer.wrapMode = TextureWrapMode.Repeat;
-            importer.mipmapEnabled = true;
-            importer.sRGBTexture = true;
-            importer.SaveAndReimport();
-            return AssetDatabase.LoadAssetAtPath<Texture2D>(path);
-        }
-
-        /// <summary>Tileable value in [0,1] (blend of four Perlin samples).</summary>
-        static float TileNoise(float u, float v, float freq)
-        {
-            u = Mathf.Repeat(u, 1f); v = Mathf.Repeat(v, 1f);
-            float x = u * freq, y = v * freq;
-            float a = Mathf.PerlinNoise(x, y), b = Mathf.PerlinNoise(x - freq, y);
-            float c = Mathf.PerlinNoise(x, y - freq), d = Mathf.PerlinNoise(x - freq, y - freq);
-            return Mathf.Lerp(Mathf.Lerp(a, b, u), Mathf.Lerp(c, d, u), v);
-        }
-
-        /// <summary>Tileable Voronoi edge distance (F2 - F1) for cobblestones.</summary>
-        static float CellEdge(float u, float v, int cells)
-        {
-            float f1 = 9f, f2 = 9f;
-            int cx = Mathf.FloorToInt(u * cells), cy = Mathf.FloorToInt(v * cells);
-            for (int oy = -1; oy <= 1; oy++)
-            for (int ox = -1; ox <= 1; ox++)
-            {
-                int gx = cx + ox, gy = cy + oy;
-                int hx = ((gx % cells) + cells) % cells, hy = ((gy % cells) + cells) % cells;
-                var rng = new System.Random(hx * 73856093 ^ hy * 19349663);
-                float px = (gx + 0.15f + 0.7f * (float)rng.NextDouble()) / cells;
-                float py = (gy + 0.15f + 0.7f * (float)rng.NextDouble()) / cells;
-                float d = Vector2.Distance(new Vector2(u, v), new Vector2(px, py)) * cells;
-                if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) f2 = d;
-            }
-            return f2 - f1;
-        }
-
-        static void BuildRoadMarkers(Transform parent)
-        {
-            // Roads are painted into the terrain; these markers document them (useful for NPC waypoints later).
-            foreach (var road in Roads)
-            {
-                var r = new GameObject(road.name).transform;
-                r.SetParent(parent, false);
-                var a = new GameObject("Start").transform; a.SetParent(r, false); a.position = new Vector3(road.a.x, 0f, road.a.y);
-                var b = new GameObject("End").transform; b.SetParent(r, false); b.position = new Vector3(road.b.x, 0f, road.b.y);
-            }
-            var ring = new GameObject("Road_SquareRing").transform;
-            ring.SetParent(parent, false);
-            ring.position = SquareCenter;
-        }
-
-        static void BuildMapBounds(Transform parent)
-        {
-            float h = 30f, e = PlayHalfExtent, len = e * 2f + 2f;
-            void Wall(string n, Vector3 pos, Vector3 size)
-            {
-                var w = new GameObject(n);
-                w.transform.SetParent(parent, false);
-                w.transform.position = pos;
-                w.AddComponent<BoxCollider>().size = size;
-            }
-            Wall("Bound_North", new Vector3(0, h / 2, e), new Vector3(len, h, 1));
-            Wall("Bound_South", new Vector3(0, h / 2, -e), new Vector3(len, h, 1));
-            Wall("Bound_East", new Vector3(e, h / 2, 0), new Vector3(1, h, len));
-            Wall("Bound_West", new Vector3(-e, h / 2, 0), new Vector3(1, h, len));
-            Log($"Invisible map bounds at +/-{e} m.");
-        }
-
-        // ================================================================== bottle
-
-        static GameObject BuildBottle(Transform root, out Vector3 inputAccess, out Vector3 outputAccess)
-        {
-            inputAccess = outputAccess = SquareCenter;
-            var model = AssetDatabase.LoadAssetAtPath<GameObject>(TankPath);
-            if (model == null)
-            {
-                Warn($"MISSING: {TankPath}");
-                return new GameObject("GiantWineBottle");
-            }
-            var go = (GameObject)PrefabUtility.InstantiatePrefab(model);
-            go.name = "GiantWineBottle";
-            go.transform.SetParent(root, false);
-            go.transform.position = SquareCenter;
-
-            // Colliders on every mesh except the liquid inside.
-            int added = 0;
-            foreach (var mf in go.GetComponentsInChildren<MeshFilter>())
-            {
-                if (mf.name.Contains("WineLiquid")) continue;
-                if (mf.GetComponent<Collider>() == null) { mf.gameObject.AddComponent<MeshCollider>(); added++; }
-            }
-
-            // Face the grape sign toward the spawn side (south).
-            var sign = FindDeep(go.transform, "Tank_GrapeSign");
-            if (sign != null)
-            {
-                Vector3 d = BoundsOf(sign.gameObject).center - go.transform.position; d.y = 0;
-                // Pure yaw. (FromToRotation flips the model upside down when the vectors are opposite.)
-                if (d.sqrMagnitude > 0.01f)
-                    go.transform.rotation = Quaternion.Euler(0f, Vector3.SignedAngle(d, Vector3.back, Vector3.up), 0f) * go.transform.rotation;
-            }
-            // Recentre on the square using the support structure / overall bounds.
-            var b = BoundsOf(go);
-            go.transform.position += new Vector3(SquareCenter.x - b.center.x, 0f, SquareCenter.z - b.center.z);
-            b = BoundsOf(go);
-            if (b.min.y < -0.5f || b.min.y > 0.5f) Warn($"Bottle is not standing on the ground (bottom at {b.min.y:F2} m). Check its orientation.");
-            Log($"Bottle: size {b.size.x:F1} x {b.size.y:F1} x {b.size.z:F1} m at {Fmt(b.center)}; added {added} MeshColliders.");
-            if (b.size.y < 4f || b.size.y > 20f) Warn($"Bottle height {b.size.y:F1} m looks off. Check the FBX scale.");
-
-            // Access markers for future gameplay.
-            Vector3 MakeAccess(string childName, string markerName)
-            {
-                var part = FindDeep(go.transform, childName);
-                if (part == null) { Warn($"Bottle part '{childName}' not found."); return SquareCenter; }
-                var pb = BoundsOf(part.gameObject);
-                Vector3 dir = pb.center - b.center; dir.y = 0; dir.Normalize();
-                // Furthest point of the part along dir, plus clearance for a player.
-                float reach = Vector3.Dot(pb.extents, new Vector3(Mathf.Abs(dir.x), 0, Mathf.Abs(dir.z)));
-                Vector3 p = new Vector3(pb.center.x, 0f, pb.center.z) + dir * (reach + 1.0f);
-                var m = new GameObject(markerName).transform;
-                m.SetParent(go.transform, true);
-                m.position = p;
-                m.rotation = Quaternion.LookRotation(-dir, Vector3.up);
-                Log($"  {childName}: centre height {pb.center.y:F2} m (bottom {pb.min.y:F2}, top {pb.max.y:F2}); access marker '{markerName}' at {Fmt(p)}");
-                return p;
-            }
-            inputAccess = MakeAccess("WineInput_Funnel", "InputFunnel_Access");
-            outputAccess = MakeAccess("WineTap_Spout", "OutputTap_Access");
-            return go;
-        }
-
-        // ================================================================== town
-
-        struct HouseSlot { public string prefab; public Vector2 pos; public float yawJitter; public bool faceSquare; public float fixedYaw; }
-
-        static void BuildHouses(Transform parent, List<Rect> footprints)
-        {
-            Vector2 c = XZ(SquareCenter);
-            Vector2 Polar(float deg, float r) => c + new Vector2(Mathf.Cos(deg * Mathf.Deg2Rad), Mathf.Sin(deg * Mathf.Deg2Rad)) * r;
-
-            var slots = new List<HouseSlot>
-            {
-                // Houses are ~16-18 m footprints, so three on the north arc (r 25) is what fits inside the map.
-                new HouseSlot { prefab = "House_1", pos = Polar(35f, 25f),  yawJitter = 6f,  faceSquare = true },
-                new HouseSlot { prefab = "House_2", pos = Polar(90f, 24f),  yawJitter = -5f, faceSquare = true },
-                new HouseSlot { prefab = "House_3", pos = Polar(145f, 25f), yawJitter = 8f,  faceSquare = true },
-                new HouseSlot { prefab = "House_2", pos = new Vector2(27f, -6f),  yawJitter = 4f,  faceSquare = true },
-                new HouseSlot { prefab = "House_3", pos = new Vector2(-27f, -6f), yawJitter = -4f, faceSquare = true },
-                // Farmhouse next to the vineyard, facing the farm path.
-                new HouseSlot { prefab = "House_2", pos = new Vector2(-26f, -29f), faceSquare = false, fixedYaw = 90f },
-            };
-
-            int i = 0;
-            foreach (var s in slots)
-            {
-                i++;
-                var prefab = LoadPack(s.prefab);
-                if (prefab == null) continue;
-                var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, parent);
-                go.name = $"{s.prefab}_{i:00}" + (i == slots.Count ? "_Farmhouse" : "");
-
-                float yaw;
-                if (s.faceSquare)
+            // Heights.
+            var heights = new float[HeightRes, HeightRes];
+            var worldH = new float[HeightRes, HeightRes];
+            float cell = TerrainSize / (HeightRes - 1);
+            for (int z = 0; z < HeightRes; z++)
+                for (int x = 0; x < HeightRes; x++)
                 {
-                    Vector2 toSquare = c - s.pos;
-                    yaw = Mathf.Atan2(toSquare.x, toSquare.y) * Mathf.Rad2Deg + s.yawJitter;
+                    float wx = -TerrainSize / 2f + x * cell, wz = -TerrainSize / 2f + z * cell;
+                    float hh = FinalHeight(wx, wz, houses, bridge);
+                    worldH[z, x] = hh;
+                    heights[z, x] = Mathf.Clamp01((hh - TerrainBaseY) / TerrainHeight);
                 }
-                else yaw = s.fixedYaw;
-                yaw += HouseFrontYawOffset;
+            terrain.terrainData.SetHeights(0, 0, heights);
+            CheckTerrain("after heights", worldH);
 
-                PlaceCentered(go, s.pos, yaw);
-                EnsureColliders(go);
-
-                // Push outward until it no longer overlaps other houses / the square / roads / work areas.
-                Vector2 outward = (s.pos - c).sqrMagnitude > 0.01f ? (s.pos - c).normalized : Vector2.up;
-                if (!s.faceSquare) outward = Vector2.left;
-                int pushes = 0;
-                while (pushes < 15)
-                {
-                    var fp = FootprintOf(go, 1.0f);
-                    string clash = Clash(fp, footprints, checkRoads: true);
-                    if (clash == null) break;
-                    go.transform.position += new Vector3(outward.x, 0f, outward.y);
-                    pushes++;
-                    if (pushes == 15) Warn($"{go.name} still overlaps {clash} after moving it outward 15 m.");
-                }
-                var finalFp = FootprintOf(go, 1.0f);
-                footprints.Add(finalFp);
-                if (finalFp.xMin < -PlayHalfExtent || finalFp.xMax > PlayHalfExtent || finalFp.yMin < -PlayHalfExtent || finalFp.yMax > PlayHalfExtent)
-                    Warn($"{go.name} crosses the map boundary (+/-{PlayHalfExtent} m).");
-                var bb = BoundsOf(go);
-                Log($"House {go.name}: size {bb.size.x:F1} x {bb.size.y:F1} x {bb.size.z:F1} m at {Fmt(bb.center)}, yaw {yaw:F0}, pushed {pushes} m");
-                if (bb.size.y < 3f || bb.size.y > 30f) Warn($"{go.name} height {bb.size.y:F1} m looks off. Check the pack scale.");
+            var maps = PaintSplat(houses, worldH);
+            terrain.terrainData.SetAlphamaps(0, 0, maps);
+            WriteSplatTextures(terrain.terrainData, maps);
+            foreach (var at in terrain.terrainData.alphamapTextures)
+            {
+                bool inAsset = AssetDatabase.Contains(at);
+                Log($"Splat texture {at.name}: part of asset={inAsset} ({AssetDatabase.GetAssetPath(at)})");
+                if (!inAsset) AssetDatabase.AddObjectToAsset(at, terrain.terrainData);
             }
-        }
-
-        static void BuildSquareProps(Transform parent, List<Rect> footprints)
-        {
-            // Lanterns around the edge of the square (none on the south side where the spawns / main road are).
-            var lantern = LoadPack("Lantern");
-            if (lantern != null)
-            {
-                float[] angles = { 0f, 45f, 90f, 135f, 180f, 215f, 325f };
-                int i = 0;
-                foreach (float a in angles)
-                {
-                    Vector2 p = XZ(SquareCenter) + Dir(a) * (SquareRadius + 0.6f);
-                    var go = (GameObject)PrefabUtility.InstantiatePrefab(lantern, parent);
-                    go.name = $"Lantern_{++i:00}";
-                    go.transform.position = new Vector3(p.x, 0f, p.y);
-                    go.transform.rotation = Quaternion.Euler(0f, 180f - a + 90f, 0f); // arm points roughly into the square
-                    EnsureColliders(go);
-                }
-            }
-
-            // Benches on the north half, facing the bottle.
-            var bench = LoadPack("Bench");
-            if (bench != null)
-            {
-                float[] angles = { 40f, 90f, 140f };
-                int i = 0;
-                foreach (float a in angles)
-                {
-                    Vector2 p = XZ(SquareCenter) + Dir(a) * (SquareRadius - 2.2f);
-                    var go = (GameObject)PrefabUtility.InstantiatePrefab(bench, parent);
-                    go.name = $"Bench_{++i:00}";
-                    Vector2 toCenter = XZ(SquareCenter) - p;
-                    PlaceCentered(go, p, Mathf.Atan2(toCenter.x, toCenter.y) * Mathf.Rad2Deg);
-                    EnsureColliders(go);
-                }
-            }
-
-            // A few flowers / pots near the lanterns (no colliders: purely decorative).
-            string[] flowers = { "Flower_1", "Flower_2", "Flower_3", "Flower_4", "Flower_5", "Flower Pot" };
-            var rng = new System.Random(7);
-            for (int i = 0; i < 10; i++)
-            {
-                var prefab = LoadPack(flowers[i % flowers.Length], quiet: true);
-                if (prefab == null) continue;
-                // Flank the lanterns on the square's edge (north half only).
-                float a = (i / 2) * 45f + (i % 2 == 0 ? -2.5f : 2.5f);
-                Vector2 p = XZ(SquareCenter) + Dir(a) * (SquareRadius + 0.3f + (float)rng.NextDouble() * 0.6f);
-                var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, parent);
-                go.name = $"Decor_{prefab.name}_{i:00}";
-                go.transform.position = new Vector3(p.x, 0f, p.y);
-                go.transform.rotation = Quaternion.Euler(0f, (float)rng.NextDouble() * 360f, 0f);
-                foreach (var col in go.GetComponentsInChildren<Collider>()) Object.DestroyImmediate(col);
-            }
-        }
-
-        // ================================================================== vineyard
-
-        static List<Vector3> BuildVineyard(Transform parent)
-        {
-            var aisles = new List<Vector3>();
-            var model = AssetDatabase.LoadAssetAtPath<GameObject>(VinePath);
-            if (model == null) { Warn($"MISSING: {VinePath}"); return aisles; }
-
-            const int rows = 4, perRow = 4;
-            const float rowSpacing = 4.2f;   // ~2.8 m clear aisle between trellises
-            float[] rowX = new float[rows];
-            for (int r = 0; r < rows; r++) rowX[r] = (r - (rows - 1) / 2f) * rowSpacing;
-
-            // Measure one vine to space them end-to-end along the trellis.
-            var probe = (GameObject)PrefabUtility.InstantiatePrefab(model);
-            var pb = BoundsOf(probe);
-            bool alongX = pb.size.x > pb.size.z;
-            float length = alongX ? pb.size.x : pb.size.z;
-            Object.DestroyImmediate(probe);
-            float step = Mathf.Max(length - 0.25f, 2.5f);
-            float zStart = VineyardRect.yMax - 3.9f - step / 2f; // leaves a ~3.9 m headland at the north entrance
-            Log($"GrapeVine: size {pb.size.x:F2} x {pb.size.y:F2} x {pb.size.z:F2} m, trellis along {(alongX ? "X (rotated 90)" : "Z")}, step {step:F2} m");
-
-            int n = 0;
-            for (int r = 0; r < rows; r++)
-            {
-                var row = new GameObject($"Row_{r + 1:00}").transform;
-                row.SetParent(parent, false);
-                for (int i = 0; i < perRow; i++)
-                {
-                    var vine = (GameObject)PrefabUtility.InstantiatePrefab(model, row);
-                    vine.name = $"GrapeVine_R{r + 1}_{i + 1:00}";
-                    float z = zStart - i * step;
-                    PlaceCentered(vine, new Vector2(rowX[r], z), alongX ? 90f : 0f, keepPivotY: true);
-                    vine.transform.position = new Vector3(vine.transform.position.x, 0f, vine.transform.position.z);
-
-                    // Simple trellis collider (rows act like walls; aisles stay free).
-                    var vb = BoundsOf(vine);
-                    var box = vine.AddComponent<BoxCollider>();
-                    Vector3 localCenter = vine.transform.InverseTransformPoint(new Vector3(vb.center.x, 1.1f, vb.center.z));
-                    box.center = localCenter;
-                    box.size = alongX ? new Vector3(step, 2.2f, 0.4f) : new Vector3(0.4f, 2.2f, step);
-                    n++;
-                }
-            }
-            float rowEnd = zStart - (perRow - 1) * step - step / 2f;
-            for (int r = 0; r < rows - 1; r++)
-                aisles.Add(new Vector3((rowX[r] + rowX[r + 1]) / 2f, 0f, (zStart + rowEnd) / 2f));
-            Log($"Vineyard: {n} vines in {rows} rows, row spacing {rowSpacing} m, rows span z {zStart + step / 2f:F1}..{rowEnd:F1}");
-            if (rowEnd < VineyardRect.yMin + 1f) Warn("Vine rows reach the southern fence.");
-            return aisles;
-        }
-
-        static void BuildFences(Transform parent)
-        {
-            var fence = LoadPack("Fence");
-            if (fence == null) return;
-            var probe = (GameObject)PrefabUtility.InstantiatePrefab(fence);
-            var b = BoundsOf(probe);
-            float seg = Mathf.Max(b.size.x, b.size.z);
-            bool alongX = b.size.x >= b.size.z;
-            Object.DestroyImmediate(probe);
-
-            var r = VineyardRect;
-            float gapHalf = 3.5f; // north entrance width ~7 m
-            void Line(string name, Vector2 a, Vector2 bb, float skipFrom = float.NaN, float skipTo = float.NaN)
-            {
-                var line = new GameObject(name).transform;
-                line.SetParent(parent, false);
-                Vector2 d = bb - a; float len = d.magnitude; d /= len;
-                int count = Mathf.CeilToInt(len / seg - 0.05f);
-                float actual = len / count;
-                float yaw = Mathf.Atan2(d.x, d.y) * Mathf.Rad2Deg - (alongX ? 90f : 0f);
-                for (int i = 0; i < count; i++)
-                {
-                    float t0 = i * actual, t1 = t0 + actual;
-                    if (!float.IsNaN(skipFrom) && t1 > skipFrom && t0 < skipTo) continue;
-                    Vector2 p = a + d * (t0 + actual / 2f);
-                    var go = (GameObject)PrefabUtility.InstantiatePrefab(fence, line);
-                    go.name = $"Fence_{i + 1:00}";
-                    PlaceCentered(go, p, yaw, keepPivotY: true);
-                    EnsureColliders(go);
-                }
-            }
-            float w = r.width;
-            Line("VineyardFence_North", new Vector2(r.xMin, r.yMax), new Vector2(r.xMax, r.yMax), w / 2f - gapHalf, w / 2f + gapHalf);
-            Line("VineyardFence_South", new Vector2(r.xMin, r.yMin), new Vector2(r.xMax, r.yMin));
-            Line("VineyardFence_West", new Vector2(r.xMin, r.yMin), new Vector2(r.xMin, r.yMax));
-            Line("VineyardFence_East", new Vector2(r.xMax, r.yMin), new Vector2(r.xMax, r.yMax));
-            Log($"Fences: segment {seg:F2} m, vineyard perimeter with ~{gapHalf * 2f:F0} m north entrance.");
-        }
-
-        // ================================================================== production
-
-        static Dictionary<string, Vector3> BuildProductionArea(Transform parent)
-        {
-            var points = new Dictionary<string, Vector3>();
-            var padMat = MakeMat("StationPad", new Color(0.86f, 0.74f, 0.42f));
-            (string name, Vector2 pos, Vector2 size)[] stations =
-            {
-                ("CrushingStation_Spawn",     new Vector2(-7.5f, -8.5f),  new Vector2(5f, 4.5f)),
-                ("FermentationStation_Spawn", new Vector2(7.5f, -8.5f),   new Vector2(5f, 4.5f)),
-                ("BarrelStorage_Spawn",       new Vector2(-7.5f, -14.5f), new Vector2(5f, 4.5f)),
-                ("ExpansionStation_Slot_01",  new Vector2(7.5f, -14.5f),  new Vector2(5f, 4.5f)),
-            };
-            foreach (var s in stations)
-            {
-                var go = new GameObject(s.name);
-                go.transform.SetParent(parent, false);
-                go.transform.position = new Vector3(s.pos.x, 0f, s.pos.y);
-                go.transform.rotation = Quaternion.LookRotation(new Vector3(-Mathf.Sign(s.pos.x), 0, 0)); // face the main road
-
-                // Thin, non-colliding pad so the reserved space is visible in game.
-                var pad = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                pad.name = "PlaceholderPad";
-                Object.DestroyImmediate(pad.GetComponent<Collider>());
-                pad.transform.SetParent(go.transform, false);
-                pad.transform.localPosition = new Vector3(0f, 0.01f, 0f);
-                pad.transform.localScale = new Vector3(s.size.y, 0.02f, s.size.x);
-                pad.GetComponent<Renderer>().sharedMaterial = padMat;
-                pad.GetComponent<Renderer>().shadowCastingMode = ShadowCastingMode.Off;
-                points[s.name] = go.transform.position;
-            }
-
-            // A few crates by the barrel storage slot (decor, solid).
-            var crate = LoadPack("Crate");
-            if (crate != null)
-            {
-                Vector3[] cp = { new Vector3(-11f, 0f, -16.8f), new Vector3(-9.9f, 0f, -16.9f), new Vector3(-10.5f, 1f, -16.85f) };
-                for (int i = 0; i < cp.Length; i++)
-                {
-                    var go = (GameObject)PrefabUtility.InstantiatePrefab(crate, parent);
-                    go.name = $"Crate_{i + 1:00}";
-                    go.transform.position = cp[i];
-                    go.transform.rotation = Quaternion.Euler(0f, i * 17f, 0f);
-                    EnsureColliders(go);
-                }
-            }
-            Log("Production area: 4 reserved station slots (empty GameObjects + flat non-colliding pads).");
-            return points;
-        }
-
-        // ================================================================== nature
-
-        static void BuildNature(Transform parent, List<Rect> footprints)
-        {
-            var rng = new System.Random(1234);
-            string[] trees = { "Tree_1", "Tree_2", "Tree_3", "Tree_4", "Tree_5", "Tree_6", "Tree_7", "Tree_8",
-                               "Pine Tree_1", "Pine Tree_2", "Pine Tree_3", "Pine Tree_4", "Pine Tree_5" };
-            var treeRoot = Child(parent, "Trees");
-            int placed = 0, skipped = 0;
-
-            bool Clear(Vector2 p, float radius)
-            {
-                var r = new Rect(p.x - radius, p.y - radius, radius * 2, radius * 2);
-                return Clash(r, footprints, checkRoads: true) == null;
-            }
-
-            void Tree(Vector2 p, float clearance)
-            {
-                if (!Clear(p, clearance)) { skipped++; return; }
-                var prefab = LoadPack(trees[rng.Next(trees.Length)], quiet: true);
-                if (prefab == null) return;
-                var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, treeRoot);
-                go.name = $"{prefab.name}_{++placed:00}";
-                go.transform.position = new Vector3(p.x, 0f, p.y);
-                go.transform.rotation = Quaternion.Euler(0f, (float)rng.NextDouble() * 360f, 0f);
-                float s = 0.85f + (float)rng.NextDouble() * 0.3f;
-                go.transform.localScale = Vector3.one * s;
-                EnsureColliders(go);
-                footprints.Add(new Rect(p.x - 1.5f, p.y - 1.5f, 3f, 3f));
-            }
-
-            // Perimeter ring of trees (a soft natural border).
-            for (float a = 0f; a < 360f; a += 11f)
-            {
-                float ang = a + (float)rng.NextDouble() * 5f;
-                float r = 39f + (float)rng.NextDouble() * 5f;
-                Vector2 p = Dir(ang) * r;
-                p.x = Mathf.Clamp(p.x, -43.5f, 43.5f);
-                p.y = Mathf.Clamp(p.y, -43.5f, 43.5f);
-                Tree(p, 2f);
-            }
-            // Outer layer beyond the walls (visual depth).
-            for (float a = 5f; a < 360f; a += 14f)
-                Tree(Dir(a + (float)rng.NextDouble() * 6f) * (52f + (float)rng.NextDouble() * 10f), 2f);
-            // A few trees inside the village for shade / framing.
-            Vector2[] inner = { new Vector2(-17f, -10f), new Vector2(17f, -12f), new Vector2(16f, -30f), new Vector2(-14f, -38f),
-                                new Vector2(31f, -22f), new Vector2(-33f, 20f), new Vector2(34f, 20f), new Vector2(20f, 36f), new Vector2(-21f, 36f) };
-            foreach (var p in inner) Tree(p, 2.5f);
-            Log($"Trees: {placed} placed, {skipped} skipped because they would block a road or building.");
-
-            // Rocks.
-            var rockRoot = Child(parent, "Rocks");
-            Vector2[] rocks = { new Vector2(13f, -24f), new Vector2(-13f, -33f), new Vector2(14f, -37f), new Vector2(-16f, 2f),
-                                new Vector2(19f, 0f), new Vector2(-36f, -14f), new Vector2(37f, -9f), new Vector2(-8f, 38f) };
-            int rp = 0;
-            foreach (var p in rocks)
-            {
-                if (!Clear(p, 1.2f)) continue;
-                var prefab = LoadPack($"Rock_{rng.Next(1, 5)}", quiet: true);
-                if (prefab == null) continue;
-                var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, rockRoot);
-                go.name = $"{prefab.name}_{++rp:00}";
-                go.transform.position = new Vector3(p.x, 0.1f, p.y);
-                go.transform.rotation = Quaternion.Euler(0f, (float)rng.NextDouble() * 360f, 0f);
-                EnsureColliders(go);
-            }
-
-            // Distant mountains as a horizon backdrop (outside the playable area).
-            var mountRoot = Child(parent, "Mountains");
-            for (int i = 0; i < 4; i++)
-            {
-                var prefab = LoadPack($"Mountain_{i + 1}", quiet: true);
-                if (prefab == null) continue;
-                var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, mountRoot);
-                float a = 35f + i * 90f;
-                Vector2 p = Dir(a) * 150f;
-                go.transform.position = new Vector3(p.x, -2f, p.y);
-                go.transform.rotation = Quaternion.Euler(0f, -a + 90f, 0f);
-                foreach (var col in go.GetComponentsInChildren<Collider>()) Object.DestroyImmediate(col); // unreachable
-            }
-        }
-
-        // ================================================================== lighting / camera
-
-        static void BuildLighting(Transform parent)
-        {
-            var sunGo = new GameObject("Sun");
-            sunGo.transform.SetParent(parent, false);
-            sunGo.transform.rotation = Quaternion.Euler(42f, -35f, 0f);
-            var sun = sunGo.AddComponent<Light>();
-            sun.type = LightType.Directional;
-            sun.color = new Color(1f, 0.91f, 0.76f);
-            sun.intensity = 1.35f;
-            sun.shadows = LightShadows.Soft;
-            sun.shadowStrength = 0.75f;
-            RenderSettings.sun = sun;
-
-            RenderSettings.ambientMode = AmbientMode.Trilight;
-            RenderSettings.ambientSkyColor = new Color(0.62f, 0.70f, 0.82f);
-            RenderSettings.ambientEquatorColor = new Color(0.62f, 0.58f, 0.50f);
-            RenderSettings.ambientGroundColor = new Color(0.30f, 0.27f, 0.21f);
-            RenderSettings.skybox = AssetDatabase.GetBuiltinExtraResource<Material>("Default-Skybox.mat");
-            RenderSettings.fog = true;
-            RenderSettings.fogMode = FogMode.Linear;
-            RenderSettings.fogColor = new Color(0.80f, 0.83f, 0.86f);
-            RenderSettings.fogStartDistance = 70f;
-            RenderSettings.fogEndDistance = 260f;
-
-            // Global post-processing volume (warm, soft).
-            string profilePath = GenDir + "/VillageVolumeProfile.asset";
-            AssetDatabase.DeleteAsset(profilePath);
-            var profile = ScriptableObject.CreateInstance<VolumeProfile>();
-            AssetDatabase.CreateAsset(profile, profilePath);
-            var tm = profile.Add<Tonemapping>(true); tm.mode.Override(TonemappingMode.Neutral);
-            var bloom = profile.Add<Bloom>(true); bloom.intensity.Override(0.35f); bloom.threshold.Override(1.05f);
-            var ca = profile.Add<ColorAdjustments>(true); ca.saturation.Override(10f); ca.postExposure.Override(0.1f);
-            var wb = profile.Add<WhiteBalance>(true); wb.temperature.Override(8f);
-            var vig = profile.Add<Vignette>(true); vig.intensity.Override(0.18f);
-            foreach (var comp in profile.components) { comp.name = comp.GetType().Name; AssetDatabase.AddObjectToAsset(comp, profile); }
-            EditorUtility.SetDirty(profile);
-
-            var volGo = new GameObject("GlobalVolume");
-            volGo.transform.SetParent(parent, false);
-            var vol = volGo.AddComponent<Volume>();
-            vol.isGlobal = true;
-            vol.sharedProfile = profile;
-
-            EnablePostProcessingOnPlayerCamera();
-            Log("Lighting: warm directional sun with soft shadows, trilight ambient, linear fog, global volume.");
-        }
-
-        static void EnablePostProcessingOnPlayerCamera()
-        {
-            var player = AssetDatabase.LoadAssetAtPath<GameObject>(PlayerPrefabPath);
-            if (player == null) return;
-            var cam = player.GetComponentInChildren<Camera>(true);
-            if (cam == null) return;
-            var data = cam.GetComponent<UniversalAdditionalCameraData>();
-            if (data != null && data.renderPostProcessing) return;
-            using (var scope = new PrefabUtility.EditPrefabContentsScope(PlayerPrefabPath))
-            {
-                var c = scope.prefabContentsRoot.GetComponentInChildren<Camera>(true);
-                var d = c.GetComponent<UniversalAdditionalCameraData>();
-                if (d == null) d = c.gameObject.AddComponent<UniversalAdditionalCameraData>();
-                d.renderPostProcessing = true;
-            }
-            Log("Player prefab camera: enabled post-processing (visual only, no network change).");
-        }
-
-        static void BuildMenuCamera(Transform root)
-        {
-            var camGo = new GameObject("MenuCamera");
-            camGo.tag = "MainCamera";
-            camGo.transform.SetParent(root, false);
-            camGo.transform.position = new Vector3(14f, 16f, -24f);
-            camGo.transform.LookAt(SquareCenter + Vector3.up * 3f);
-            var cam = camGo.AddComponent<Camera>();
-            cam.farClipPlane = 600f;
-            camGo.AddComponent<AudioListener>();
-            var data = camGo.AddComponent<UniversalAdditionalCameraData>();
-            data.renderPostProcessing = true;
-        }
-
-        // ================================================================== spawns
-
-        static List<Vector3> BuildSpawns(Transform parent)
-        {
-            var list = new List<Vector3>();
-            Vector3[] candidates =
-            {
-                new Vector3(-6f, 0f, 1.0f), new Vector3(-2f, 0f, 0.0f),
-                new Vector3(2f, 0f, 0.0f),  new Vector3(6f, 0f, 1.0f),
-            };
+            CheckTerrain("after splat", worldH);
+            PaintDetails(terrain.terrainData, maps);
+            CheckTerrain("after details", worldH);
+            EditorUtility.SetDirty(terrain.terrainData);
+            AssetDatabase.SaveAssets();
+            CheckTerrain("after save", worldH);
             Physics.SyncTransforms();
-            for (int i = 0; i < candidates.Length; i++)
+            Log($"Terrain: {TerrainSize} m square, heightmap {HeightRes} (0.5 m), splat {AlphaRes}, {layers.Length} layers, square at y={plazaH:F2}, yard at y={courtH:F2}.");
+        }
+
+        static Texture2D grassTuftTex;
+
+        /// <summary>Mirror the weights into the splat textures' CPU pixels so the asset serializes them.</summary>
+        static void WriteSplatTextures(TerrainData d, float[,,] maps)
+        {
+            int res = d.alphamapResolution, L = d.alphamapLayers;
+            var tex = d.alphamapTextures;
+            for (int ti = 0; ti < tex.Length; ti++)
             {
-                Vector3 p = FindFreeSpot(candidates[i]);
-                var go = new GameObject($"PlayerSpawn_{i + 1:00}");
-                go.transform.SetParent(parent, false);
-                go.transform.position = p;
-                Vector3 look = SquareCenter - p; look.y = 0;
-                go.transform.rotation = Quaternion.LookRotation(look.normalized, Vector3.up);
-                go.AddComponent<NetworkStartPosition>();
-                list.Add(p);
+                var px = new Color[res * res];
+                int b = ti * 4;
+                for (int z = 0; z < res; z++)
+                    for (int x = 0; x < res; x++)
+                        px[z * res + x] = new Color(b < L ? maps[z, x, b] : 0f, b + 1 < L ? maps[z, x, b + 1] : 0f,
+                                                    b + 2 < L ? maps[z, x, b + 2] : 0f, b + 3 < L ? maps[z, x, b + 3] : 0f);
+                tex[ti].SetPixels(px);
+                tex[ti].Apply();
+                EditorUtility.SetDirty(tex[ti]);
             }
-            return list;
+            d.SetBaseMapDirty();
         }
 
-        static bool CapsuleFree(Vector3 feet) =>
-            !Physics.CheckCapsule(feet + Vector3.up * 0.55f, feet + Vector3.up * 1.6f, 0.5f, ~0, QueryTriggerInteraction.Ignore);
-
-        static Vector3 FindFreeSpot(Vector3 p)
+        static void CheckTerrain(string stage, float[,] worldH)
         {
-            if (CapsuleFree(p)) return p;
-            for (float r = 0.5f; r <= 4f; r += 0.5f)
-                for (float a = 0; a < 360f; a += 30f)
-                {
-                    Vector3 q = p + new Vector3(Mathf.Cos(a * Mathf.Deg2Rad), 0, Mathf.Sin(a * Mathf.Deg2Rad)) * r;
-                    if (CapsuleFree(q)) return q;
-                }
-            Warn($"No free spawn spot near {Fmt(p)}.");
-            return p;
+            int i = HeightRes / 2 + 40, j = HeightRes / 2 + 60;   // a point north-east of the square
+            float cell = TerrainSize / (HeightRes - 1);
+            float x = -TerrainSize / 2f + j * cell, z = -TerrainSize / 2f + i * cell;
+            float got = GroundY(x, z), want = worldH[i, j];
+            var a = terrain.terrainData.GetAlphamaps(AlphaRes / 2, AlphaRes / 2 + 8, 1, 1);
+            var t1 = terrain.terrainData.alphamapTextures.Length > 1 ? terrain.terrainData.alphamapTextures[1].GetPixel(AlphaRes / 2, AlphaRes / 2 + 8) : Color.clear;
+            string msg = $"Terrain check {stage}: height at ({x:F0},{z:F0}) {got:F2} (expected {want:F2}); square splat cobble={a[0, 0, LCobble]:F2}, texture={t1.g:F2}";
+            if (Mathf.Abs(got - want) > 0.05f) Warn(msg); else Log(msg);
         }
 
-        // ================================================================== verification
-
-        static void Verify(Transform root, List<Vector3> spawns, Vector3 inputAccess, Vector3 outputAccess,
-                           Dictionary<string, Vector3> stations, List<Vector3> aisles)
+        static Material TerrainMaterial()
         {
-            Log("---- Verification ----");
-
-            // Colliders on buildings.
-            foreach (var r in root.Find("Town/Buildings").GetComponentsInChildren<Renderer>())
-                if (r.GetComponentInParent<Collider>() == null && r.GetComponent<Collider>() == null)
-                    Warn($"Renderer without collider: {r.name}");
-
-            // Ground under each spawn, spawn free.
-            for (int i = 0; i < spawns.Count; i++)
-            {
-                bool ground = Physics.Raycast(spawns[i] + Vector3.up * 5f, Vector3.down, out var hit, 10f) && hit.collider is TerrainCollider;
-                bool free = CapsuleFree(spawns[i]);
-                Log($"Spawn {i + 1} {Fmt(spawns[i])}: ground={(ground ? "terrain" : "NOT TERRAIN")} free={free}");
-                if (!ground || !free) Warn($"Spawn {i + 1} is blocked or has no terrain under it.");
-            }
-            Log($"Bottle input access free: {CapsuleFree(inputAccess)}, output access free: {CapsuleFree(outputAccess)}");
-            if (!CapsuleFree(inputAccess) || !CapsuleFree(outputAccess)) Warn("A bottle access point is blocked.");
-
-            // NavMesh over the play area: used to verify routes (and kept for future NPCs).
-            var navGo = new GameObject("NavMesh");
-            navGo.transform.SetParent(root, false);
-            var surface = navGo.AddComponent<NavMeshSurface>();
-            surface.collectObjects = CollectObjects.Volume;
-            surface.center = new Vector3(0f, 5f, 0f);
-            surface.size = new Vector3(PlayHalfExtent * 2f, 20f, PlayHalfExtent * 2f);
-            surface.useGeometry = NavMeshCollectGeometry.PhysicsColliders;
-            surface.agentTypeID = 0; // Humanoid: radius 0.5, so every passage that bakes is at least ~1 m wide
-            surface.BuildNavMesh();
-            string navPath = GenDir + "/Village_NavMesh.asset";
-            AssetDatabase.DeleteAsset(navPath);
-            if (surface.navMeshData != null)
-            {
-                AssetDatabase.CreateAsset(surface.navMeshData, navPath);
-                var tri = NavMesh.CalculateTriangulation();
-                Log($"NavMesh baked: {tri.indices.Length / 3} triangles (agent radius {NavMesh.GetSettingsByID(0).agentRadius} m).");
-            }
-            else Warn("NavMesh bake produced no data.");
-
-            if (spawns.Count == 0) return;
-            Vector3 from = spawns[0];
-            var targets = new List<(string, Vector3)>
-            {
-                ("Bottle input funnel", inputAccess),
-                ("Bottle output tap", outputAccess),
-                ("Square north side", SquareCenter + new Vector3(0, 0, 8f)),
-                ("East road exit", new Vector3(40f, 0f, 4.5f)),
-                ("West road exit", new Vector3(-40f, 0f, 6.5f)),
-                ("Farm path end", new Vector3(-17f, 0f, -23f)),
-            };
-            foreach (var kv in stations) targets.Add((kv.Key, kv.Value));
-            for (int i = 0; i < aisles.Count; i++) targets.Add(($"Vineyard aisle {i + 1}", aisles[i]));
-
-            var path = new NavMeshPath();
-            for (int i = 1; i < spawns.Count; i++) targets.Add(($"Spawn {i + 1}", spawns[i]));
-            foreach (var (name, target) in targets)
-            {
-                if (!NavMesh.SamplePosition(from, out var a, 2f, NavMesh.AllAreas) ||
-                    !NavMesh.SamplePosition(target, out var b, 2f, NavMesh.AllAreas))
-                {
-                    Warn($"Route to {name}: point not on the NavMesh ({Fmt(target)}).");
-                    continue;
-                }
-                NavMesh.CalculatePath(a.position, b.position, NavMesh.AllAreas, path);
-                float len = 0f;
-                for (int k = 1; k < path.corners.Length; k++) len += Vector3.Distance(path.corners[k - 1], path.corners[k]);
-                Log($"Route spawn 1 -> {name}: {path.status}, {len:F0} m (~{len / 5f:F0} s walking)");
-                if (path.status != NavMeshPathStatus.PathComplete) Warn($"No complete route to {name}.");
-            }
-        }
-
-        // ================================================================== helpers
-
-        static GameObject LoadPack(string name, bool quiet = false)
-        {
-            var go = AssetDatabase.LoadAssetAtPath<GameObject>(Pack + name + ".prefab");
-            if (go == null && !quiet) Warn($"MISSING prefab: {Pack}{name}.prefab");
-            return go;
-        }
-
-        static Transform Child(Transform parent, string name)
-        {
-            var t = new GameObject(name).transform;
-            t.SetParent(parent, false);
-            return t;
-        }
-
-        static Transform FindDeep(Transform t, string name)
-        {
-            foreach (var c in t.GetComponentsInChildren<Transform>(true))
-                if (c.name == name) return c;
-            return null;
-        }
-
-        static Bounds BoundsOf(GameObject go)
-        {
-            var rs = go.GetComponentsInChildren<Renderer>();
-            if (rs.Length == 0) return new Bounds(go.transform.position, Vector3.zero);
-            var b = rs[0].bounds;
-            for (int i = 1; i < rs.Length; i++) b.Encapsulate(rs[i].bounds);
-            return b;
-        }
-
-        static Rect FootprintOf(GameObject go, float margin)
-        {
-            var b = BoundsOf(go);
-            return Rect.MinMaxRect(b.min.x - margin, b.min.z - margin, b.max.x + margin, b.max.z + margin);
-        }
-
-        /// <summary>Rotate, then move so the renderer bounds are centred on xz (pivots in the pack are not always centred).</summary>
-        static void PlaceCentered(GameObject go, Vector2 xz, float yaw, bool keepPivotY = true)
-        {
-            // Keep the model's imported root rotation (e.g. Blender axis conversion), add the yaw on top.
-            go.transform.rotation = Quaternion.Euler(0f, yaw, 0f) * go.transform.rotation;
-            go.transform.position = new Vector3(xz.x, 0f, xz.y);
-            var b = BoundsOf(go);
-            go.transform.position += new Vector3(xz.x - b.center.x, 0f, xz.y - b.center.z);
-            if (!keepPivotY) go.transform.position += Vector3.up * -b.min.y;
-        }
-
-        static void EnsureColliders(GameObject go)
-        {
-            if (go.GetComponentInChildren<Collider>() != null) return;
-            foreach (var mf in go.GetComponentsInChildren<MeshFilter>())
-                mf.gameObject.AddComponent<MeshCollider>();
-            Log($"  added MeshCollider(s) to {go.name}");
-        }
-
-        /// <summary>Returns what a footprint overlaps (null if nothing).</summary>
-        static string Clash(Rect fp, List<Rect> others, bool checkRoads)
-        {
-            foreach (var o in others) if (fp.Overlaps(o)) return "another object";
-            Vector2 c = XZ(SquareCenter);
-            if (RectCircleDistance(fp, c) < RingRoadOuter + 0.5f) return "the village square";
-            if (fp.Overlaps(Expand(ProductionRect, 1f))) return "the production area";
-            if (fp.Overlaps(Expand(VineyardRect, 1.5f))) return "the vineyard";
-            if (checkRoads)
-                foreach (var r in Roads)
-                    for (int i = 0; i <= 20; i++)
-                    {
-                        Vector2 p = Vector2.Lerp(r.a, r.b, i / 20f);
-                        if (RectPointDistance(fp, p) < r.width * 0.5f + 0.5f) return r.name;
-                    }
-            return null;
-        }
-
-        static Rect Expand(Rect r, float m) => Rect.MinMaxRect(r.xMin - m, r.yMin - m, r.xMax + m, r.yMax + m);
-        static float RectPointDistance(Rect r, Vector2 p)
-        {
-            float dx = Mathf.Max(r.xMin - p.x, 0f, p.x - r.xMax);
-            float dz = Mathf.Max(r.yMin - p.y, 0f, p.y - r.yMax);
-            return Mathf.Sqrt(dx * dx + dz * dz);
-        }
-        static float RectCircleDistance(Rect r, Vector2 c) => RectPointDistance(r, c);
-
-        static float DistToSegment(Vector2 p, Vector2 a, Vector2 b)
-        {
-            Vector2 ab = b - a;
-            float t = Mathf.Clamp01(Vector2.Dot(p - a, ab) / ab.sqrMagnitude);
-            return Vector2.Distance(p, a + ab * t);
-        }
-
-        static Vector2 XZ(Vector3 v) => new Vector2(v.x, v.z);
-        static Vector2 Dir(float deg) => new Vector2(Mathf.Cos(deg * Mathf.Deg2Rad), Mathf.Sin(deg * Mathf.Deg2Rad));
-        static string Fmt(Vector3 v) => $"({v.x:F1}, {v.y:F1}, {v.z:F1})";
-
-        static Material MakeMat(string name, Color color)
-        {
-            string path = $"{GenDir}/{name}.mat";
+            string path = GenDir + "/VillageTerrain.mat";
+            var shader = Shader.Find("Universal Render Pipeline/Terrain/Lit");
             var mat = AssetDatabase.LoadAssetAtPath<Material>(path);
-            if (mat == null)
-            {
-                mat = new Material(Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard"));
-                AssetDatabase.CreateAsset(mat, path);
-            }
-            if (mat.HasProperty("_BaseColor")) mat.SetColor("_BaseColor", color);
-            if (mat.HasProperty("_Color")) mat.SetColor("_Color", color);
-            if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", 0.1f);
+            if (mat == null) { mat = new Material(shader); AssetDatabase.CreateAsset(mat, path); }
+            else mat.shader = shader;
+            mat.enableInstancing = true;
             EditorUtility.SetDirty(mat);
             return mat;
         }
 
-        static void SetStaticRecursive(GameObject go)
+        static float[,,] PaintSplat(List<HouseInfo> houses, float[,] worldH)
         {
-            foreach (var t in go.GetComponentsInChildren<Transform>(true))
-                GameObjectUtility.SetStaticEditorFlags(t.gameObject,
-                    StaticEditorFlags.BatchingStatic | StaticEditorFlags.OccluderStatic | StaticEditorFlags.OccludeeStatic | StaticEditorFlags.ReflectionProbeStatic);
+            int L = layers.Length;
+            var maps = new float[AlphaRes, AlphaRes, L];
+            var w = new float[L];
+            float hCell = TerrainSize / (HeightRes - 1);
+
+            void Over(int layer, float a)
+            {
+                if (a <= 0f) return;
+                a = Mathf.Clamp01(a);
+                for (int i = 0; i < L; i++) w[i] *= (1f - a);
+                w[layer] += a;
+            }
+
+            for (int z = 0; z < AlphaRes; z++)
+                for (int x = 0; x < AlphaRes; x++)
+                {
+                    float wx = -TerrainSize / 2f + x / (float)(AlphaRes - 1) * TerrainSize;
+                    float wz = -TerrainSize / 2f + z / (float)(AlphaRes - 1) * TerrainSize;
+                    var p = new Vector2(wx, wz);
+                    float nA = Mathf.PerlinNoise(wx * 0.045f + 7f, wz * 0.045f + 3f);
+                    float nB = Mathf.PerlinNoise(wx * 0.16f + 1.7f, wz * 0.16f + 9.2f);
+                    float nC = Mathf.PerlinNoise(wx * 0.7f + 5.5f, wz * 0.7f + 2.4f);
+                    float jitter = (nC - 0.5f) * 0.7f + (nB - 0.5f) * 0.7f;
+
+                    for (int i = 0; i < L; i++) w[i] = 0f;
+                    float meadow = Mathf.Clamp01((nA - 0.56f) * 3.5f);
+                    float dark = Mathf.Clamp01((0.40f - nA) * 3.5f);
+                    w[LGrass] = 1f - meadow - dark; w[LMeadow] = meadow; w[LGrassDark] = dark;
+
+                    // Slopes (hills): darker grass, then exposed dirt on steep parts.
+                    int hx = Mathf.Clamp(Mathf.RoundToInt((wx + TerrainSize / 2f) / hCell), 1, HeightRes - 2);
+                    int hz = Mathf.Clamp(Mathf.RoundToInt((wz + TerrainSize / 2f) / hCell), 1, HeightRes - 2);
+                    float gx = (worldH[hz, hx + 1] - worldH[hz, hx - 1]) / (2f * hCell);
+                    float gz = (worldH[hz + 1, hx] - worldH[hz - 1, hx]) / (2f * hCell);
+                    float slope = Mathf.Sqrt(gx * gx + gz * gz);
+                    float r = p.magnitude;
+                    Over(LGrassDark, Smooth01(55f, 85f, r) * 0.6f);
+                    Over(LGrassDark, Smooth01(0.35f, 0.6f, slope + jitter * 0.1f));
+                    Over(LDirt, Smooth01(0.75f, 1.1f, slope + jitter * 0.15f) * 0.8f);
+
+                    // Worn ground around buildings.
+                    foreach (var hs in houses)
+                    {
+                        float d = hs.ObbDistance(p);
+                        if (d < 2.5f) Over(LDirt, (1f - Smooth01(0.2f, 1.6f, d + jitter)) * 0.55f);
+                    }
+
+                    // Production yard: compacted dirt with gravel patches.
+                    float ce = CourtEllipse(p) + jitter * 0.08f;
+                    float cmask = 1f - Smooth01(0.92f, 1.08f, ce);
+                    Over(LDirt, cmask);
+                    Over(LGravel, cmask * Smooth01(0.5f, 0.7f, nB) * 0.6f);
+
+                    // Roads: dirt, cobbled near the square.
+                    float re = SampleField(fRoadEdge, wx, wz) + jitter * 0.5f;
+                    float road = 1f - Smooth01(-0.45f, 0.45f, re);
+                    if (road > 0f)
+                    {
+                        int id = SampleFieldId(wx, wz);
+                        bool canCobble = id >= 0 && Roads[id].canCobble;
+                        float cob = canCobble ? 1f - Smooth01(22f, 30f, Vector2.Distance(p, SquareC) + jitter * 5f) : 0f;
+                        Over(LDirt, road * (1f - cob));
+                        Over(LCobble, road * cob);
+                        Over(LGravel, road * (1f - cob) * Smooth01(0.62f, 0.8f, nC) * 0.5f);
+                    }
+
+                    // Village square: cobbles with grass growing in at the edges.
+                    float ps = PlazaSignedDist(p) + jitter * 0.9f;
+                    float plaza = 1f - Smooth01(-0.4f, 0.4f, ps);
+                    Over(LCobble, plaza);
+                    if (plaza > 0f && ps > -3f) Over(LGrass, plaza * Smooth01(0.66f, 0.8f, nC) * 0.8f);
+
+                    // Planting beds on the square.
+                    foreach (var b in SquareBeds)
+                    {
+                        float d = Vector2.Distance(p, b) - 1.9f + jitter * 0.3f;
+                        if (d < 0.5f) Over(LGrass, 1f - Smooth01(-0.2f, 0.4f, d));
+                    }
+
+                    // Vineyard: tilled soil under each row, meadow in the aisles.
+                    if (p.x > VineyardRect.xMin - 1f && p.x < VineyardRect.xMax + 1f && p.y > VineyardRect.yMin - 1f && p.y < VineyardRect.yMax + 1f)
+                    {
+                        float inside = (1f - Smooth01(-0.5f, 0.5f, RectDist(VineyardRect, p) + jitter));
+                        Over(LMeadow, inside * 0.5f);
+                        foreach (float rx in RowX)
+                        {
+                            float zTop = VineZ[0] + 1.6f, zBot = VineZ[VineZ.Length - 1] - 1.6f;
+                            float dx = Mathf.Abs(p.x - rx) - 0.85f;
+                            float dz = Mathf.Max(p.y - zTop, zBot - p.y, 0f);
+                            float soil = (1f - Smooth01(-0.15f, 0.3f, dx + jitter * 0.25f)) * (1f - Smooth01(0f, 0.8f, dz + jitter * 0.3f));
+                            Over(LSoil, soil);
+                        }
+                    }
+
+                    // Fenced fields: furrows of tilled soil.
+                    foreach (var f in Fields)
+                    {
+                        float fd = RectDist(f.rect, p);
+                        if (fd > 1.2f) continue;
+                        float inner = f.rect.Contains(p) ? Mathf.Min(p.x - f.rect.xMin, f.rect.xMax - p.x, p.y - f.rect.yMin, f.rect.yMax - p.y) : 0f;
+                        float inMask = f.rect.Contains(p) ? Smooth01(0f, 0.6f, inner + jitter * 0.2f) : 0f;
+                        Over(LDirt, (1f - Smooth01(0f, 1.2f, fd)) * 0.5f);
+                        float c = f.rowsAlongX ? p.y - f.rect.yMin : p.x - f.rect.xMin;
+                        float m = Mathf.Repeat(c, 1.5f);
+                        Over(LSoil, inMask * (m < 0.85f ? 1f : 0.35f));
+                    }
+
+                    // Stream banks: gravel near water, lush grass beyond.
+                    float sd = SampleField(fStream, wx, wz) + jitter * 0.6f;
+                    Over(LGrassDark, (1f - Smooth01(4.5f, 7.5f, sd)) * 0.8f);
+                    Over(LGravel, 1f - Smooth01(3.0f, 4.2f, sd));
+                    Over(LDirt, (1f - Smooth01(0.5f, 1.8f, sd)) * 0.5f);
+
+                    float sum = 0f;
+                    for (int i = 0; i < L; i++) sum += w[i];
+                    for (int i = 0; i < L; i++) maps[z, x, i] = w[i] / Mathf.Max(sum, 1e-4f);
+                }
+            return maps;
         }
 
-        static void EnsureFolder(string path)
+        static void PaintDetails(TerrainData data, float[,,] maps)
         {
-            if (AssetDatabase.IsValidFolder(path)) return;
-            string parent = Path.GetDirectoryName(path).Replace('\\', '/');
-            EnsureFolder(parent);
-            AssetDatabase.CreateFolder(parent, Path.GetFileName(path));
+            var grassTex = grassTuftTex;
+            var protos = new List<DetailPrototype>
+            {
+                new DetailPrototype
+                {
+                    prototypeTexture = grassTex, usePrototypeMesh = false, renderMode = DetailRenderMode.Grass,
+                    minWidth = 0.4f, maxWidth = 0.7f, minHeight = 0.22f, maxHeight = 0.42f, noiseSpread = 0.3f,
+                    healthyColor = new Color(0.62f, 0.78f, 0.38f), dryColor = new Color(0.72f, 0.74f, 0.40f),
+                    useInstancing = false, alignToGround = 0.6f,
+                },
+            };
+            string[] flowerNames = { "Flower_1", "Flower_3", "Flower_5" };
+            foreach (var fn in flowerNames)
+            {
+                var fp = LoadPack(fn);
+                if (fp == null) continue;
+                protos.Add(new DetailPrototype
+                {
+                    prototype = fp, usePrototypeMesh = true, renderMode = DetailRenderMode.VertexLit, useInstancing = true,
+                    minWidth = 0.35f, maxWidth = 0.6f, minHeight = 0.35f, maxHeight = 0.6f, noiseSpread = 0.4f,
+                    healthyColor = Color.white, dryColor = Color.white, alignToGround = 0.5f,
+                });
+            }
+            data.detailPrototypes = protos.ToArray();
+            data.SetDetailResolution(DetailRes, 32);
+            data.SetDetailScatterMode(DetailScatterMode.InstanceCountMode);
+
+            var grass = new int[DetailRes, DetailRes];
+            var flowers = new int[protos.Count - 1][,];
+            for (int i = 0; i < flowers.Length; i++) flowers[i] = new int[DetailRes, DetailRes];
+            var drng = new System.Random(77);
+            int total = 0, totalF = 0;
+            for (int z = 0; z < DetailRes; z++)
+                for (int x = 0; x < DetailRes; x++)
+                {
+                    float wx = -TerrainSize / 2f + (x + 0.5f) / DetailRes * TerrainSize;
+                    float wz = -TerrainSize / 2f + (z + 0.5f) / DetailRes * TerrainSize;
+                    float r = Mathf.Sqrt(wx * wx + wz * wz);
+                    if (r > 105f) continue;
+                    int ax = Mathf.Clamp(Mathf.RoundToInt((x + 0.5f) / DetailRes * (AlphaRes - 1)), 0, AlphaRes - 1);
+                    int az = Mathf.Clamp(Mathf.RoundToInt((z + 0.5f) / DetailRes * (AlphaRes - 1)), 0, AlphaRes - 1);
+                    float green = maps[az, ax, LGrass] + maps[az, ax, LGrassDark] + maps[az, ax, LMeadow];
+                    if (green < 0.9f) continue;
+                    if (RoadEdge(wx, wz) < 1.0f || StreamDist(wx, wz) < 3.8f || CourtEllipse(new Vector2(wx, wz)) < 1.2f) continue;
+                    if (Fields.Any(f => RectDist(f.rect, new Vector2(wx, wz)) < 0.6f)) continue;
+                    if (PlazaSignedDist(new Vector2(wx, wz)) < 0.5f && !SquareBeds.Any(b => Vector2.Distance(b, new Vector2(wx, wz)) < 1.7f)) continue;
+                    float n = Mathf.PerlinNoise(wx * 0.11f + 30f, wz * 0.11f + 12f);
+                    float dens = Smooth01(0.3f, 0.75f, n) * (1f - Smooth01(70f, 105f, r));
+                    int c = Mathf.FloorToInt(dens * 3f + (float)drng.NextDouble());
+                    grass[z, x] = c; total += c;
+                    // Wild flowers in meadow patches.
+                    float fm = maps[az, ax, LMeadow];
+                    float fn = Mathf.PerlinNoise(wx * 0.07f + 90f, wz * 0.07f + 40f);
+                    if (fm > 0.3f && fn > 0.55f && drng.NextDouble() < 0.18f)
+                    {
+                        flowers[drng.Next(flowers.Length)][z, x] = 1; totalF++;
+                    }
+                }
+            data.SetDetailLayer(0, 0, 0, grass);
+            for (int i = 0; i < flowers.Length; i++) data.SetDetailLayer(0, 0, i + 1, flowers[i]);
+            Log($"Terrain details: ~{total} grass tufts, ~{totalF} wild flowers (instanced Flower meshes from the pack).");
         }
 
-        static void AddSceneToBuildSettingsFirst(string path)
+        // ================================================================== houses (layout)
+
+        class HouseInfo
         {
-            var list = new List<EditorBuildSettingsScene>(EditorBuildSettings.scenes);
-            list.RemoveAll(s => s.path == path);
-            list.Insert(0, new EditorBuildSettingsScene(path, true));
-            EditorBuildSettings.scenes = list.ToArray();
+            public HouseDef def; public GameObject go; public Vector2 center; public float yaw; public Vector2 half; public float padHeight;
+            public Vector2 Forward => new Vector2(Mathf.Sin(yaw * Mathf.Deg2Rad), Mathf.Cos(yaw * Mathf.Deg2Rad));
+            public Vector2 Right => new Vector2(Forward.y, -Forward.x);
+            public Vector2 DoorPoint => center + Forward * (half.y + 0.6f);
+            public float ObbDistance(Vector2 p)
+            {
+                Vector2 d = p - center;
+                float lx = Vector2.Dot(d, Right), lz = Vector2.Dot(d, Forward);
+                float ex = Mathf.Max(Mathf.Abs(lx) - half.x, 0f), ez = Mathf.Max(Mathf.Abs(lz) - half.y, 0f);
+                return Mathf.Sqrt(ex * ex + ez * ez);
+            }
         }
 
-        static void Log(string msg) => report.AppendLine(msg);
-        static void Warn(string msg) { warnings++; report.AppendLine("WARNING: " + msg); Debug.LogWarning("[Village] " + msg); }
+        static List<HouseInfo> PrepareHouses()
+        {
+            var list = new List<HouseInfo>();
+            foreach (var d in HouseDefs)
+            {
+                var prefab = LoadPack(d.prefab);
+                if (prefab == null) continue;
+                Transform parent = d.role == "VillageCenter" ? H.CenterBuildings : d.role == "Production" ? H.ProdBuildings : H.ResBuildings;
+                var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, parent);
+                go.name = $"{d.id} ({d.prefab})";
+                Vector2 dir = d.faceTo - d.pos;
+                float yaw = Mathf.Atan2(dir.x, dir.y) * Mathf.Rad2Deg;
+                go.transform.localScale = new Vector3(d.mirror ? -d.scale : d.scale, d.scale, d.scale);
+                go.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+                go.transform.position = Vector3.zero;
+
+                // Local-space footprint (rotation-independent), then centre the footprint on the target position.
+                var mf = go.GetComponentInChildren<MeshFilter>();
+                var mb = mf.sharedMesh.bounds;
+                Vector3 lc = Vector3.Scale(mb.center, go.transform.localScale);
+                Vector3 ls = Vector3.Scale(mb.size, new Vector3(Mathf.Abs(go.transform.localScale.x), d.scale, d.scale));
+                Vector3 worldCenterOffset = go.transform.rotation * lc;
+                go.transform.position = new Vector3(d.pos.x - worldCenterOffset.x, 0f, d.pos.y - worldCenterOffset.z);
+
+                var info = new HouseInfo
+                {
+                    def = d, go = go, center = d.pos, yaw = yaw,
+                    half = new Vector2(ls.x / 2f, ls.z / 2f),
+                    padHeight = BaseHeight(d.pos.x, d.pos.y),
+                };
+                list.Add(info);
+            }
+            // Layout sanity: overlaps with roads / other houses / key areas.
+            foreach (var h in list)
+            {
+                foreach (var o in list)
+                    if (o != h && h.ObbDistance(o.center) < Mathf.Min(o.half.x, o.half.y) + 0.5f)
+                        Warn($"{h.def.id} overlaps {o.def.id}");
+                foreach (var r in Roads)
+                    foreach (var p in r.pts)
+                        if (h.ObbDistance(p) < r.width / 2f + 0.3f) { Warn($"{h.def.id} touches road {r.name} at {p}"); break; }
+                if (PlazaSignedDist(h.center) < 0f) Warn($"{h.def.id} centre is inside the square");
+            }
+            return list;
+        }
+
+        static void SettleHouses(List<HouseInfo> houses)
+        {
+            foreach (var h in houses)
+            {
+                // Sit on the lowest point of the footprint so no corner floats; foundations sink slightly.
+                float minH = float.MaxValue;
+                for (int i = -1; i <= 1; i++)
+                    for (int j = -1; j <= 1; j++)
+                    {
+                        Vector2 p = h.center + h.Right * (h.half.x * i * 0.95f) + h.Forward * (h.half.y * j * 0.95f);
+                        minH = Mathf.Min(minH, GroundY(p.x, p.y));
+                    }
+                var pos = h.go.transform.position;
+                h.go.transform.position = new Vector3(pos.x, minH - 0.08f, pos.z);
+                Log($"Building {h.def.id}: {h.def.prefab} x{h.def.scale:F2}{(h.def.mirror ? " mirrored" : "")}, centre ({h.center.x:F1}, {h.center.y:F1}), yaw {h.yaw:F0}, footprint {h.half.x * 2:F1} x {h.half.y * 2:F1} m, base y {minH:F2}");
+            }
+        }
+
+        // ================================================================== bridge (layout)
+
+        class BridgeInfo
+        {
+            public GameObject go; public Vector2 center; public Vector2 axis; public float halfLength;
+            public List<(Vector2 xz, float height)> ends = new List<(Vector2, float)>();
+        }
+
+        static BridgeInfo PrepareBridge()
+        {
+            var prefab = LoadPack("Bridge");
+            if (prefab == null) return null;
+            int si = NearestIndex(streamPts, BridgeHint);
+            Vector2 c = streamPts[si];
+            // Road direction at the crossing.
+            var road = Roads.First(r => r.name == "Road_East");
+            int ri = NearestIndex(road.pts, c);
+            Vector2 axis = (road.pts[Mathf.Min(ri + 1, road.pts.Count - 1)] - road.pts[Mathf.Max(ri - 1, 0)]).normalized;
+            float yaw = Mathf.Atan2(axis.x, axis.y) * Mathf.Rad2Deg;
+            float bankH = streamRef[si];
+
+            var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, H.Bridges);
+            go.name = "StoneBridge_EastRoad";
+            go.transform.rotation = Quaternion.Euler(0f, yaw, 0f) * prefab.transform.rotation;
+            go.transform.position = new Vector3(c.x, bankH + 0.05f, c.y);
+            Physics.SyncTransforms();
+
+            var info = new BridgeInfo { go = go, center = c, axis = axis, halfLength = 6.18f };
+            foreach (float s in new[] { -1f, 1f })
+            {
+                Vector2 e = c + axis * s * 5.9f;
+                float y = bankH;
+                if (Physics.Raycast(new Vector3(e.x, bankH + 10f, e.y), Vector3.down, out var hit, 20f)) y = hit.point.y;
+                info.ends.Add((c + axis * s * 6.6f, y - 0.04f));
+            }
+            Log($"Bridge: across the stream at ({c.x:F1}, {c.y:F1}), yaw {yaw:F0}, bank level {bankH:F2}, deck end heights {info.ends[0].height:F2} / {info.ends[1].height:F2}");
+            return info;
+        }
     }
 }
