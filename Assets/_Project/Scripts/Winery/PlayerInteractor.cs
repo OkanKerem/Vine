@@ -72,6 +72,9 @@ namespace Vineyard.Winery
                 nextClickTime = Time.unscaledTime + 0.2f;
                 TryInteract();
             }
+            var kb = Keyboard.current;
+            if (locked && kb != null && kb.gKey.wasPressedThisFrame) RequestEmptyBucket();
+            if (locked && kb != null && kb.bKey.wasPressedThisFrame) RequestDropBucket();
             wasLocked = locked;
         }
 
@@ -104,7 +107,7 @@ namespace Vineyard.Winery
         /// <summary>Interact with whatever is aimed at (also used by automated tests).</summary>
         public void TryInteract()
         {
-            if (Current == null) return;                    // clicking empty space / scenery does nothing
+            if (Current == null || bucket.IsPouring) return; // clicking empty space / scenery does nothing
             var prompt = Current.station.GetPrompt(Current, bucket);
             if (!prompt.actionable)
             {
@@ -127,6 +130,7 @@ namespace Vineyard.Winery
         {
             if (NetworkTime.time - lastServerRequest < serverMinInterval) return;   // spam / duplicate clicks
             lastServerRequest = NetworkTime.time;
+            if (bucket.IsPouring) return;                                            // hands busy tipping the bucket
 
             if (stationIdentity == null || !stationIdentity.TryGetComponent(out WineryStation station)) return;
             var target = station.Find(part, index);
@@ -141,6 +145,43 @@ namespace Vineyard.Winery
 
             string msg = station.ServerInteract(target, bucket, out bool ok, out string floatText);
             TargetFeedback(msg, ok, floatText, target.FeedbackPoint);
+        }
+
+        /// <summary>G: pour the bucket out (also used by automated tests).</summary>
+        public void RequestEmptyBucket()
+        {
+            if (bucket.HasBucket && bucket.Amount > 0 && !bucket.IsPouring) CmdEmptyBucket();
+        }
+
+        /// <summary>B: put the bucket down in front of the player (also used by automated tests).</summary>
+        public void RequestDropBucket()
+        {
+            if (bucket.HasBucket && !bucket.IsPouring) CmdDropBucket();
+        }
+
+        [Command]
+        void CmdDropBucket()
+        {
+            if (NetworkTime.time - lastServerRequest < serverMinInterval) return;
+            lastServerRequest = NetworkTime.time;
+            if (!bucket.HasBucket || bucket.IsPouring || WorldBucket.Prefab == null) return;
+            Vector3 fwd = transform.forward;
+            Vector3 spot = WorldBucket.FindGroundSpot(transform.position, fwd, 0.85f);
+            if (!bucket.ServerTakeBucket(out var t, out int n, out int cap)) return;
+            WorldBucket.ServerSpawn(spot, transform.eulerAngles.y + 180f, t, n, cap);
+            TargetFeedback("Put the bucket down", true, null, Vector3.zero);
+        }
+
+        /// <summary>Pour the whole bucket out on the ground (G). The content is lost.</summary>
+        [Command]
+        void CmdEmptyBucket()
+        {
+            if (NetworkTime.time - lastServerRequest < serverMinInterval) return;
+            lastServerRequest = NetworkTime.time;
+            ResourceType t = bucket.Type;
+            int n = bucket.Amount;
+            if (bucket.ServerEmpty())
+                TargetFeedback($"Poured out {t.Amount(n)}", true, null, Vector3.zero);
         }
 
         [TargetRpc]

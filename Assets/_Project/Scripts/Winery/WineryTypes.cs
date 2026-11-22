@@ -11,6 +11,18 @@ namespace Vineyard.Winery
         PressInput = 10, PressHandle = 11, PressOutput = 12,
         FermenterInput = 20, FermenterOutput = 21,
         BottleFunnel = 30, BottleBody = 31, BottleTap = 32,
+        BucketPickup = 40,
+    }
+
+    /// <summary>Anything that shows bucket contents (the carried bucket, or one standing on the ground).</summary>
+    public interface IBucketContents
+    {
+        ResourceType Type { get; }
+        int Amount { get; }
+        float Fill { get; }
+        /// <summary>0..1 through a tip-out animation, or -1 when not pouring.</summary>
+        float PourProgress { get; }
+        ResourceType PourType { get; }
     }
 
     /// <summary>What the HUD shows for the targeted object (computed on the client from synced state).</summary>

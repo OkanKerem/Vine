@@ -1,6 +1,8 @@
 using System;
+using System.Linq;
 using Mirror;
 using UnityEngine;
+using Vineyard.Winery;
 
 namespace Vineyard.Networking
 {
@@ -27,10 +29,50 @@ namespace Vineyard.Networking
             maxConnections = Mathf.Clamp(maxConnections, 1, MaxPlayers);
         }
 
+        [Header("Winery")]
+        [Tooltip("Empty spare buckets the host places next to each machine output (press, fermenter) at start.")]
+        public int spareBucketsPerMachine = 1;
+
         public override void Awake()
         {
             maxConnections = Mathf.Clamp(maxConnections, 1, MaxPlayers);
+            // Ground buckets are spawned at runtime: host and clients must both know the prefab.
+            var wb = WorldBucket.Prefab;
+            if (wb != null && !spawnPrefabs.Contains(wb)) spawnPrefabs.Add(wb);
             base.Awake();
+        }
+
+        public override void OnStartServer()
+        {
+            base.OnStartServer();
+            SpawnSpareBuckets();
+        }
+
+        /// <summary>Spare buckets let a player with full hands put theirs down and still empty a full machine.</summary>
+        void SpawnSpareBuckets()
+        {
+            if (spareBucketsPerMachine <= 0 || WorldBucket.Prefab == null) return;
+            var outputs = FindObjectsByType<WineryInteractable>(FindObjectsInactive.Include, FindObjectsSortMode.None)
+                .Where(i => i.part == InteractionPart.PressOutput || i.part == InteractionPart.FermenterOutput)
+                .GroupBy(i => i.station)
+                .Select(g => g.First());
+            foreach (var output in outputs)
+            {
+                Bounds b = output.colliders != null && output.colliders.Length > 0 && output.colliders[0]
+                    ? output.colliders[0].bounds : new Bounds(output.transform.position, Vector3.one * 0.5f);
+                // Away from the machine body, on the side the output faces.
+                Vector3 machine = output.station != null && output.station.interactables != null
+                    ? output.station.interactables.Where(i => i && i.part != output.part).Select(i => i.transform.position).DefaultIfEmpty(b.center).Aggregate(Vector3.zero, (a, p) => a + p)
+                    : b.center;
+                int count = output.station != null && output.station.interactables != null ? output.station.interactables.Count(i => i && i.part != output.part) : 0;
+                if (count > 0) machine /= count;
+                Vector3 dir = b.center - machine;
+                for (int k = 0; k < spareBucketsPerMachine; k++)
+                {
+                    Vector3 spot = WorldBucket.FindGroundSpot(b.center, Quaternion.Euler(0f, 50f + k * 40f, 0f) * dir, 0.9f + k * 0.5f, 16);
+                    WorldBucket.ServerSpawn(spot, UnityEngine.Random.Range(0f, 360f), ResourceType.Empty, 0, 10);
+                }
+            }
         }
 
         public override void OnStartClient()
