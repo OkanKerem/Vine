@@ -288,6 +288,7 @@ namespace Vineyard.EditorTools
                 var v = vinesT[i];
                 var gc = v.gameObject.AddComponent<GrapevineController>();
                 gc.bunches = v.GetComponentsInChildren<Transform>(true).Where(t => t.name == "GrapeBunch").ToArray();
+                gc.maxGrapes = Mathf.Max(1, gc.bunches.Length);      // one grape per visible bunch
                 gc.foliage = v.GetComponentsInChildren<Transform>(true).FirstOrDefault(t => t.name == "Grapevine_Mesh");
                 vines.Add(gc);
 
@@ -350,6 +351,7 @@ namespace Vineyard.EditorTools
                 // Juice dripping from the spout while pressing.
                 var sp = WorldBounds(P("Press_OutputSpout"));
                 Vector3 tip = sp.center + (bb.center - sp.center).normalized * 0.0f;
+                if (!pc.crushSplashPrefab) pc.crushSplashPrefab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/Polygonal Particles/Assets/Prefabs/Water/Splash_Mobile.prefab");
                 pc.juiceStream = Stream(press, "Winery_JuiceStream", new Vector3(sp.center.x, sp.min.y, sp.center.z) + (new Vector3(bb.center.x, 0, bb.center.z) - new Vector3(sp.center.x, 0, sp.center.z)) * 0.6f,
                                         Vector3.down, JuiceMat, 40f, 0.3f, 0.6f, 0.35f, 0.035f);
                 log.Add("press: input/handle/output wired, juice level + stream");
@@ -378,6 +380,7 @@ namespace Vineyard.EditorTools
                 var ob = WorldBounds(F("Fermenter_InputOpening"));
                 fc.pourStream = Stream(ferm, "Winery_PourStream", ob.center + Vector3.up * 0.75f, Vector3.down, JuiceMat, 70f, 0.4f, 1.2f, 0.55f, 0.045f);
                 fc.bubbles = Stream(ferm, "Winery_Bubbles", ob.center + Vector3.up * 0.05f, Vector3.up, BubbleMat, 5f, 0.25f, -0.05f, 1.4f, 0.03f, 25f, 0.18f);
+                if (!fc.bubblesPrefab) fc.bubblesPrefab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/NamuFX/StylizedWaterEffects/Prefabs/Bubbles_Vertical_Loop.prefab");
                 log.Add("fermenter: lid, needle, liquid, pour stream, bubbles wired");
             }
             else log.Add("fermenter: SmallFermentationStation NOT FOUND");

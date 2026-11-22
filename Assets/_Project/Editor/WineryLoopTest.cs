@@ -218,7 +218,7 @@ namespace Vineyard.EditorTools
             Check("All four stations spawned (active)", vineyard && press && ferm && bottle,
                   $"vineyard={(bool)vineyard} press={(bool)press} fermenter={(bool)ferm} bottle={(bool)bottle}");
             if (!vineyard || !press || !ferm || !bottle) yield break;
-            Check("Vineyard has 20 vines with 8 grapes each", vineyard.vines.Length == 20 && Enumerable.Range(0, 20).All(i => vineyard.Available(i) == 8));
+            Check("Vineyard has 20 vines with 5 grapes each (one per bunch)", vineyard.vines.Length == 20 && Enumerable.Range(0, 20).All(i => vineyard.Available(i) == 5 && vineyard.vines[i].bunches.Length == 5));
 
             WineryInteractable Vine(int i) => vineyard.Find(InteractionPart.Harvest, i);
             Vector3 VineStand(int i)
@@ -237,23 +237,24 @@ namespace Vineyard.EditorTools
             // ---------------- Test 1: basic harvesting
             Log("\n== Test 1 — Basic harvesting");
             foreach (var w in Click("Harvest vine 1", VineStand(0), Vine(0), true)) yield return w;
-            Check("Bucket receives 8 grapes", bucket.Type == ResourceType.Grapes && bucket.Amount == 8, B());
+            Check("Bucket receives 5 grapes", bucket.Type == ResourceType.Grapes && bucket.Amount == 5, B());
             Check("Vine 1 becomes empty", vineyard.Available(0) == 0, $"vine={vineyard.Available(0)}");
-            Check("Feedback message shown", feedback.Any(f => f.Contains("Harvested 8")), string.Join(" | ", feedback));
+            float vine1EmptyAt = Time.time;
+            Check("Feedback message shown", feedback.Any(f => f.Contains("Harvested 5")), string.Join(" | ", feedback));
             yield return 0.6f;
-            PlayerShot("t1_bucket_8_grapes_firstperson");
+            PlayerShot("t1_bucket_5_grapes_firstperson");
             Shot("t1_vine_after_harvest", vineyard.vines[0].transform.position + new Vector3(2.2f, 1.5f, -0.6f), vineyard.vines[0].transform.position + Vector3.up * 0.9f);
 
             // ---------------- Test 2: partial harvesting
             Log("\n== Test 2 — Partial harvesting");
-            bucket.ServerRemove(ResourceType.Grapes, 1);    // test setup: 7 grapes
+            bucket.ServerAdd(ResourceType.Grapes, 2);       // test setup: 7 grapes
             yield return 0.2f;
             Check("Setup: bucket holds 7 grapes", bucket.Amount == 7, B());
             foreach (var w in Click("Harvest vine 2", VineStand(1), Vine(1), true)) yield return w;
             Check("Bucket becomes 10/10 (+3)", bucket.Amount == 10, B());
-            Check("Vine 2 keeps 5 grapes", vineyard.Available(1) == 5, $"vine={vineyard.Available(1)}");
+            Check("Vine 2 keeps 2 grapes", vineyard.Available(1) == 2, $"vine={vineyard.Available(1)}");
             foreach (var w in Click("Harvest vine 3 with a full bucket", VineStand(2), Vine(2), false)) yield return w;
-            Check("Full bucket: nothing collected, vine 3 untouched", bucket.Amount == 10 && vineyard.Available(2) == 8, $"{B()} vine3={vineyard.Available(2)}");
+            Check("Full bucket: nothing collected, vine 3 untouched", bucket.Amount == 10 && vineyard.Available(2) == 5, $"{B()} vine3={vineyard.Available(2)}");
             Check("'Bucket Full' explained", feedback.Any(f => f.Contains("Bucket Full")), string.Join(" | ", feedback));
             yield return 0.4f;
             PlayerShot("t2_bucket_full_grapes_firstperson");
@@ -332,7 +333,7 @@ namespace Vineyard.EditorTools
             Check("Bucket holds 10 L wine", bucket.Type == ResourceType.Wine && bucket.Amount == 10, B());
             Check("Fermenter empty again", ferm.Wine == 0 && ferm.State == FermentationMachineController.FermentState.Empty, $"{ferm.Wine} {ferm.State}");
             foreach (var w in Click("Harvest while carrying wine", VineStand(2), Vine(2), false)) yield return w;
-            Check("Wrong resource: grapes refused while carrying wine", bucket.Type == ResourceType.Wine && vineyard.Available(2) == 8);
+            Check("Wrong resource: grapes refused while carrying wine", bucket.Type == ResourceType.Wine && vineyard.Available(2) == 5);
             yield return 0.6f;
             PlayerShot("t4d_bucket_wine_firstperson");
 
@@ -346,6 +347,7 @@ namespace Vineyard.EditorTools
             foreach (var w in Click("Bottle: pour wine", bottleSpot, funnel, true)) yield return w;
             Check("Bucket empties", bucket.Amount == 0 && bucket.Type == ResourceType.Empty, B());
             Check("Bottle gains 10 L", bottle.Wine == 10, $"{bottle.Wine}/{bottle.capacity}");
+            Check("Team earns 0.1 money per litre (10 L -> 1.0)", System.Math.Abs(bottle.Money - 10 * bottle.moneyPerLitre) < 1e-4, $"money {bottle.Money}");
             yield return 0.4f;
             Shot("t5b_bottle_pouring", bottleSpot + new Vector3(-2.5f, 1.8f, -2.5f), funnel.FeedbackPoint, 55f);
             yield return 2.5f;
@@ -459,7 +461,14 @@ namespace Vineyard.EditorTools
 
             // ---------------- Regrowth (vine 1 was emptied at the start)
             Log("\n== Regrowth");
-            Check("Vine 1 regrows gradually (one unit per interval, not all at once)", vineyard.Available(0) > 0 && vineyard.Available(0) < 8, $"vine 1 = {vineyard.Available(0)}/8 since it was emptied");
+            {
+                var v1 = vineyard.vines[0];
+                float since = Time.time - vine1EmptyAt;
+                int expect = Mathf.Min(v1.maxGrapes, Mathf.FloorToInt(since / v1.regrowSeconds));
+                Check("Vine 1 regrows gradually (one unit per interval, not all at once)",
+                      vineyard.Available(0) > 0 && Mathf.Abs(vineyard.Available(0) - expect) <= 1,
+                      $"vine 1 = {vineyard.Available(0)}/{v1.maxGrapes} after {since:F0} s (expected ~{expect})");
+            }
             Shot("t8_regrowing_vines", vineyard.vines[0].transform.position + new Vector3(2.4f, 1.6f, 1.5f), vineyard.vines[1].transform.position + Vector3.up * 0.8f, 60f);
 
             // ---------------- Bottle full / capacity

@@ -28,7 +28,13 @@ namespace Vineyard.Winery
         public Transform liquid;           // Fermenter_Liquid (visible through the inspection glass)
         public Renderer liquidRenderer;
         public ParticleSystem pourStream;
+        [Tooltip("Play the station's own stream above the opening. Off: the player's bucket pours the juice in.")]
+        public bool useStationPourStream = false;
         public ParticleSystem bubbles;
+        [Tooltip("Bubble effect played while fermenting (NamuFX Bubbles_Vertical_Loop). Spawned where 'bubbles' sits and replaces it.")]
+        public GameObject bubblesPrefab;
+        [Tooltip("Size of the bubble prefab relative to its authored size.")]
+        public float bubblesScale = 0.05f;
 
         [Header("Animation")]
         [Tooltip("Lid angle (degrees about the hinge) when closed, relative to the authored (open) pose.")]
@@ -83,6 +89,19 @@ namespace Vineyard.Winery
                 var lb = RendererBounds(liquid);
                 liquidPivot = MakePivot(liquid, new Vector3(lb.center.x, lb.min.y, lb.center.z), "LiquidPivot (runtime)");
                 liquidScale = liquidPivot.localScale;
+            }
+            if (bubblesPrefab && bubbles)
+            {
+                // The prefab takes the place of the generated emitter (which stays as the anchor, switched off).
+                var fx = FxUtil.Spawn(bubblesPrefab, bubbles.transform.position, bubbles.transform.parent, bubblesScale);
+                var ps = fx ? fx.GetComponent<ParticleSystem>() : null;
+                if (ps)
+                {
+                    ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+                    bubbles.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+                    bubbles.gameObject.SetActive(false);
+                    bubbles = ps;
+                }
             }
         }
 
@@ -178,6 +197,10 @@ namespace Vineyard.Winery
             return null;
         }
 
+        /// <summary>The bucket pours into the input opening on top (whichever input part was clicked).</summary>
+        public override Vector3 PourPoint(WineryInteractable target) =>
+            target != null && target.part == InteractionPart.FermenterInput ? PourPointOf("Fermenter_InputOpening", target) : base.PourPoint(target);
+
         // ------------------------------------------------------------------ visuals (every client)
 
         void UpdateVisuals()
@@ -194,7 +217,7 @@ namespace Vineyard.Winery
             }
             if (lidPivot) lidPivot.localRotation = lidRest * Quaternion.Euler(Mathf.Lerp(lidClosedAngle, lidOpenAngle, open), 0f, 0f);
 
-            bool pouring = tp > openT && tp < pourDuration - closeT;
+            bool pouring = useStationPourStream && tp > openT && tp < pourDuration - closeT;
             if (pourStream)
             {
                 if (pouring && !pourStream.isEmitting) pourStream.Play();
@@ -210,6 +233,7 @@ namespace Vineyard.Winery
             if (needlePivot) needlePivot.localRotation = needleRest * Quaternion.Euler(0f, 0f, needleSweep * Progress);
 
             float level = (juice + wine) / (float)Mathf.Max(1, Mathf.Max(inputCapacity, outputCapacity));
+            if (VisualsHeld && level > shownLevel) level = shownLevel;   // juice not poured in yet
             shownLevel = Mathf.MoveTowards(shownLevel, level, Time.deltaTime * 0.8f);
             if (liquidPivot)
             {

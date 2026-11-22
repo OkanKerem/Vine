@@ -45,6 +45,43 @@ namespace Vineyard.Winery
         /// </summary>
         public abstract string ServerInteract(WineryInteractable target, PlayerBucket bucket, out bool success, out string floatText);
 
+        /// <summary>
+        /// Client side, on the click frame of an actionable prompt: optionally start the feedback animation before
+        /// the host answers. Must not change any synced state.
+        /// </summary>
+        public virtual void ClientPredict(WineryInteractable target, PlayerBucket bucket) { }
+
+        // ------------------------------------------------------------------ pouring from a bucket (visual only)
+
+        /// <summary>World point a bucket pours into for this part: top centre of its renderers by default.</summary>
+        public virtual Vector3 PourPoint(WineryInteractable target) => TopCentre(target);
+
+        /// <summary>Top centre of the interactable called <paramref name="partName"/>, or of <paramref name="fallback"/>.</summary>
+        protected Vector3 PourPointOf(string partName, WineryInteractable fallback)
+        {
+            if (interactables != null)
+                foreach (var i in interactables)
+                    if (i && i.name == partName) return TopCentre(i);
+            return TopCentre(fallback);
+        }
+
+        Vector3 TopCentre(WineryInteractable target)
+        {
+            if (target == null) return transform.position;
+            var b = RendererBounds(target.transform);
+            return b.size == Vector3.zero ? target.FeedbackPoint : new Vector3(b.center.x, b.max.y, b.center.z);
+        }
+
+        float visualHoldUntil;
+
+        /// <summary>
+        /// Client side: keep the machine's level / pile from rising until the poured content has arrived
+        /// (called by the bucket animation). Only delays the visuals; the synced state is already final.
+        /// </summary>
+        public void HoldVisuals(float untilTime) => visualHoldUntil = Mathf.Max(visualHoldUntil, untilTime);
+
+        protected bool VisualsHeld => Time.time < visualHoldUntil;
+
         // ------------------------------------------------------------------ helpers for subclasses
 
         protected static InteractionPrompt Blocked(string title, string status, string reason, float progress = -1f) =>

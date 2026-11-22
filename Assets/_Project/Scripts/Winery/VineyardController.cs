@@ -14,6 +14,8 @@ namespace Vineyard.Winery
         readonly SyncList<byte> grapes = new SyncList<byte>();
         float[] regrowTimers;
         double[] lastHarvest;
+        // Client: vine -> time of the last locally predicted harvest (its RPC must not replay the animation).
+        readonly System.Collections.Generic.Dictionary<int, float> predicted = new System.Collections.Generic.Dictionary<int, float>();
 
         public int Available(int i) => i >= 0 && i < grapes.Count ? grapes[i] : (vines != null && i < vines.Length && vines[i] ? vines[i].maxGrapes : 0);
 
@@ -49,7 +51,7 @@ namespace Vineyard.Winery
         {
             int i = target.index;
             var v = vines[i];
-            int avail = Available(i);
+            int avail = v ? v.Shown(Available(i)) : Available(i);
             string title = "Grapevine";
             string status = avail >= v.maxGrapes ? $"{avail} / {v.maxGrapes} grapes" : $"{avail} / {v.maxGrapes} grapes · regrowing";
             float progress = avail / (float)v.maxGrapes;
@@ -76,16 +78,40 @@ namespace Vineyard.Winery
             if (n <= 0) return "Bucket Full";
             grapes[i] = (byte)(avail - n);
             lastHarvest[i] = Now;
-            RpcHarvested(i);
+            RpcHarvested(i, avail, avail - n, bucket.netIdentity);
             success = true;
             floatText = $"+{n} Grapes";
             return bucket.Free == 0 ? $"Harvested {n} grapes — Bucket Full" : $"Harvested {n} grapes";
         }
 
-        [ClientRpc]
-        void RpcHarvested(int i)
+        /// <summary>
+        /// Local player clicked a vine: start the harvest animation on the click frame instead of waiting for the
+        /// host's answer, so picking feels in step with the mouse. The host's RPC then skips this player's replay.
+        /// </summary>
+        public override void ClientPredict(WineryInteractable target, PlayerBucket bucket)
         {
-            if (i >= 0 && i < vines.Length && vines[i]) vines[i].PlayHarvestFeedback();
+            int i = target.index;
+            if (target.part != InteractionPart.Harvest || i < 0 || i >= vines.Length || !vines[i] || bucket == null) return;
+            int avail = vines[i].Shown(Available(i));
+            int n = Mathf.Min(avail, bucket.Free);
+            if (n <= 0) return;
+            predicted[i] = Time.time;
+            vines[i].PlayHarvest(avail, avail - n, bucket);
+        }
+
+        /// <summary>Every client: the picked bunches fly from vine <paramref name="i"/> into the harvester's bucket.</summary>
+        [ClientRpc]
+        void RpcHarvested(int i, int before, int after, NetworkIdentity harvester)
+        {
+            if (i < 0 || i >= vines.Length || !vines[i]) return;
+            var into = harvester ? harvester.GetComponent<PlayerBucket>() : null;
+            // Already played on the click by this client (see ClientPredict).
+            if (into != null && into.isLocalPlayer && predicted.TryGetValue(i, out float at) && Time.time - at < 1.5f)
+            {
+                predicted.Remove(i);
+                return;
+            }
+            vines[i].PlayHarvest(before, after, into);
         }
     }
 }

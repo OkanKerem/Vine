@@ -109,12 +109,73 @@ namespace Vineyard.Winery
         [Server]
         public bool ServerEmpty()
         {
-            if (!hasBucket || amount <= 0 || IsPouring) return false;
+            if (!hasBucket || amount <= 0 || IsBusy) return false;
             pourType = type;
             pourStart = NetworkTime.time;
             amount = 0;
             type = ResourceType.Empty;
             return true;
+        }
+
+        // ------------------------------------------------------------------ pouring into a machine
+
+        [Tooltip("Length of the 'reach over the machine and pour' animation (s). Bucket actions wait meanwhile.")]
+        public float transferDuration = 1.3f;
+        [Tooltip("Grapes are not poured: the bunches fly from the bucket into the press. Hands are busy this long (s).")]
+        public float grapeTransferDuration = 0.7f;
+
+        /// <summary>Replicated so every client plays the same reach-and-pour animation toward the same point.</summary>
+        [SyncVar] double transferStart = -999;
+        [SyncVar] ResourceType transferType;
+        [SyncVar] Vector3 transferPoint;
+        [SyncVar] NetworkIdentity transferStation;
+
+        public double TransferStart => transferStart;
+        public ResourceType TransferType => transferType;
+        /// <summary>World point the content goes into (top of the hopper / opening / funnel).</summary>
+        public Vector3 TransferPoint => transferPoint;
+        public WineryStation TransferStation => transferStation ? transferStation.GetComponent<WineryStation>() : null;
+        /// <summary>Length of the running transfer animation (s): shorter for grapes, which only fly out.</summary>
+        public float TransferLength => transferType == ResourceType.Grapes ? grapeTransferDuration : transferDuration;
+        /// <summary>0..1 through the pour-into-machine animation, or -1 when not running.</summary>
+        public float TransferProgress
+        {
+            get
+            {
+                double t = (NetworkTime.time - transferStart) / TransferLength;
+                return t >= 0 && t < 1 ? (float)t : -1f;
+            }
+        }
+        public bool IsTransferring => TransferProgress >= 0f;
+        /// <summary>Hands busy tipping the bucket (onto the ground or into a machine).</summary>
+        public bool IsBusy => IsPouring || IsTransferring;
+
+        /// <summary>Starts the animation after a station took <paramref name="t"/> out of this bucket.</summary>
+        [Server]
+        public void ServerStartTransfer(ResourceType t, Vector3 point, NetworkIdentity station)
+        {
+            transferType = t;
+            transferPoint = point;
+            transferStation = station;
+            transferStart = NetworkTime.time;     // set last: clients react to the start time changing
+        }
+
+        BucketVisual viewVisual, worldVisual;
+        bool visualsCached;
+
+        /// <summary>The bucket model this client actually sees: first-person for the local player, the hand bucket otherwise.</summary>
+        public BucketVisual ActiveVisual
+        {
+            get
+            {
+                if (!visualsCached)
+                {
+                    visualsCached = true;
+                    foreach (var v in GetComponentsInChildren<BucketVisual>(true))
+                        if (v.viewModel) viewVisual = v; else worldVisual = v;
+                }
+                return isLocalPlayer && viewVisual && viewVisual.isActiveAndEnabled ? viewVisual : worldVisual;
+            }
         }
 
         // ------------------------------------------------------------------ putting down / picking up
@@ -124,7 +185,7 @@ namespace Vineyard.Winery
         public bool ServerTakeBucket(out ResourceType t, out int n, out int cap)
         {
             t = Type; n = amount; cap = capacity;
-            if (!hasBucket || IsPouring) return false;
+            if (!hasBucket || IsBusy) return false;
             hasBucket = false;
             amount = 0;
             type = ResourceType.Empty;

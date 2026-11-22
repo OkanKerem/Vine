@@ -19,8 +19,9 @@ namespace Vineyard.Winery
 
         GUIStyle title, body, small, center, right, floatStyle;
         Texture2D white;
-        float bucketPulse;
+        float bucketPulse, moneyPulse;
         int lastAmount = -1;
+        double lastMoney = -1;
         Camera playerCam;
         readonly OnboardingHints hints = new OnboardingHints();
         GUIStyle hintStyle, hintLabel;
@@ -138,6 +139,21 @@ namespace Vineyard.Winery
                     Shadowed(new Rect(r.x + 14, r.y + 52, 210, 20), $"{bucket.Amount} / {bucket.Capacity}{(t.IsLiquid() ? " L" : "")}", center, Color.white);
                     Bar(new Rect(r.x + 14, r.y + 76, r.width - 28, 12), bucket.Fill, ColorOf(t));
                 }
+            }
+
+            // Team money (top-right).
+            var bottle = GiantWineBottleController.Instance;
+            if (bottle != null)
+            {
+                double m = bottle.Money;
+                if (m != lastMoney) { if (lastMoney >= 0) moneyPulse = 1f; lastMoney = m; }
+                moneyPulse = Mathf.MoveTowards(moneyPulse, 0f, Time.unscaledDeltaTime * 2f);
+                Rect r = new Rect(w - 190, 20, 170, 56);
+                Box(r, Panel);
+                Box(new Rect(r.xMax - 4, r.y, 4, r.height), Gold);
+                Shadowed(new Rect(r.x + 14, r.y + 4, 150, 18), "<b>MONEY</b>", center, new Color(0.85f, 0.82f, 0.75f));
+                Shadowed(new Rect(r.x + 14, r.y + 22, 150, 30),
+                         $"<size={20 + Mathf.RoundToInt(moneyPulse * 5)}><b>{GiantWineBottleController.FormatMoney(m)}</b></size>", center, Gold);
             }
 
             float now = Time.unscaledTime;

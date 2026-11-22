@@ -114,6 +114,8 @@ namespace Vineyard.Winery
                 Feedback?.Invoke(prompt.blockReason, false); // explain locally, no request
                 return;
             }
+            if (bucket.IsTransferring && UsesBucket(Current.part)) return;   // still pouring into the last machine
+            Current.station.ClientPredict(Current, bucket);
             CmdInteract(Current.station.netIdentity, Current.part, Current.index);
         }
 
@@ -131,6 +133,7 @@ namespace Vineyard.Winery
             if (NetworkTime.time - lastServerRequest < serverMinInterval) return;   // spam / duplicate clicks
             lastServerRequest = NetworkTime.time;
             if (bucket.IsPouring) return;                                            // hands busy tipping the bucket
+            if (bucket.IsTransferring && UsesBucket(part)) return;                   // still pouring into a machine
 
             if (stationIdentity == null || !stationIdentity.TryGetComponent(out WineryStation station)) return;
             var target = station.Find(part, index);
@@ -143,20 +146,29 @@ namespace Vineyard.Winery
                 return;
             }
 
+            ResourceType typeBefore = bucket.Type;
+            int amountBefore = bucket.Amount;
             string msg = station.ServerInteract(target, bucket, out bool ok, out string floatText);
+            // Content went from the bucket into the machine: everyone sees the bucket reach over and pour it in.
+            if (ok && bucket.HasBucket && bucket.Amount < amountBefore)
+                bucket.ServerStartTransfer(typeBefore, station.PourPoint(target), station.netIdentity);
             TargetFeedback(msg, ok, floatText, target.FeedbackPoint);
         }
+
+        /// <summary>Parts that move content in or out of the bucket (the press handle does not).</summary>
+        static bool UsesBucket(InteractionPart part) =>
+            part != InteractionPart.PressHandle && part != InteractionPart.BottleBody && part != InteractionPart.BottleTap;
 
         /// <summary>G: pour the bucket out (also used by automated tests).</summary>
         public void RequestEmptyBucket()
         {
-            if (bucket.HasBucket && bucket.Amount > 0 && !bucket.IsPouring) CmdEmptyBucket();
+            if (bucket.HasBucket && bucket.Amount > 0 && !bucket.IsBusy) CmdEmptyBucket();
         }
 
         /// <summary>B: put the bucket down in front of the player (also used by automated tests).</summary>
         public void RequestDropBucket()
         {
-            if (bucket.HasBucket && !bucket.IsPouring) CmdDropBucket();
+            if (bucket.HasBucket && !bucket.IsBusy) CmdDropBucket();
         }
 
         [Command]
@@ -164,7 +176,7 @@ namespace Vineyard.Winery
         {
             if (NetworkTime.time - lastServerRequest < serverMinInterval) return;
             lastServerRequest = NetworkTime.time;
-            if (!bucket.HasBucket || bucket.IsPouring || WorldBucket.Prefab == null) return;
+            if (!bucket.HasBucket || bucket.IsBusy || WorldBucket.Prefab == null) return;
             Vector3 fwd = transform.forward;
             Vector3 spot = WorldBucket.FindGroundSpot(transform.position, fwd, 0.85f);
             if (!bucket.ServerTakeBucket(out var t, out int n, out int cap)) return;

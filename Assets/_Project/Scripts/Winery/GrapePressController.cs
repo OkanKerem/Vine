@@ -44,6 +44,12 @@ namespace Vineyard.Winery
         [Tooltip("How long the overflow spill effect runs (s).")]
         public float spillSeconds = 1.6f;
 
+        [Header("Crush splash")]
+        [Tooltip("One-shot splash when the plate reaches the bottom and the grapes are crushed (Polygonal Particles Splash_Mobile).")]
+        public GameObject crushSplashPrefab;
+        [Tooltip("Size of the splash prefab relative to its authored size.")]
+        public float crushSplashScale = 0.02f;
+
         [SyncVar] int storedGrapes;
         [SyncVar] int juice;
         [SyncVar] PressState state;
@@ -62,6 +68,8 @@ namespace Vineyard.Winery
         Quaternion screwPivotRot;
         Vector3 grapeScale;
         float shownJuice, shownGrapes;
+        float lastProgress = 1f;           // 1: a client joining mid-cycle never fires a past splash
+        Vector3 crushPoint;
         bool pivotsBuilt;
         ParticleSystem spillFx;
 
@@ -86,6 +94,8 @@ namespace Vineyard.Winery
                 grapePivot = MakePivot(grapes, new Vector3(gb.center.x, gb.min.y, gb.center.z), "GrapePivot (runtime)");
                 grapeScale = grapePivot.localScale;
             }
+            // Splash at the bottom of the plate's stroke, where the grapes end up squashed.
+            crushPoint = pb.center + Vector3.down * plateTravel;
         }
 
         // ------------------------------------------------------------------ host logic
@@ -224,6 +234,14 @@ namespace Vineyard.Winery
                 else if (!spilling && spillFx.isEmitting) spillFx.Stop(true, ParticleSystemStopBehavior.StopEmitting);
             }
             float t = Progress;
+            // Crushing done (plate at the bottom): one splash on every client, from the synced cycle time.
+            bool crushed = state == PressState.Pressing && t >= downFraction;
+            if (crushed && lastProgress < downFraction && crushSplashPrefab && pivotsBuilt)
+            {
+                var fx = FxUtil.Spawn(crushSplashPrefab, crushPoint, null, crushSplashScale);
+                if (fx) Destroy(fx, FxUtil.Lifetime(fx));
+            }
+            lastProgress = state == PressState.Pressing ? t : 0f;
             // Down stroke (eased), then the plate returns.
             float travel = state != PressState.Pressing ? 0f
                 : t < downFraction ? Ease(t / downFraction)
@@ -241,6 +259,7 @@ namespace Vineyard.Winery
             float pileTarget = storedGrapes > 0 ? Mathf.Lerp(0.35f, 1f, storedGrapes / (float)Mathf.Max(1, inputCapacity)) : 0f;
             if (state == PressState.Pressing)
                 pileTarget *= t < downFraction ? Mathf.Lerp(1f, compressedHeight, Ease(t / downFraction)) : compressedHeight * (1f - Ease((t - downFraction) / (1f - downFraction)));
+            if (VisualsHeld && state != PressState.Pressing && pileTarget > shownGrapes) pileTarget = shownGrapes;   // grapes still in the air
             shownGrapes = state == PressState.Pressing ? pileTarget : Mathf.MoveTowards(shownGrapes, pileTarget, Time.deltaTime * 2f);
             if (grapePivot)
             {
