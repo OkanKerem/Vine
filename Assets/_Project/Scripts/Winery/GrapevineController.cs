@@ -23,8 +23,10 @@ namespace Vineyard.Winery
 
         Vector3[] bunchScale;
         float[] bunchShown;
+        bool[] bunchApplied;                 // transform already matches bunchShown (skip redundant writes)
         int[] order;
         float wobble;
+        bool foliageAtRest;
         Quaternion foliageRest;
 
         void Awake()
@@ -32,6 +34,7 @@ namespace Vineyard.Winery
             if (bunches == null) bunches = new Transform[0];
             bunchScale = new Vector3[bunches.Length];
             bunchShown = new float[bunches.Length];
+            bunchApplied = new bool[bunches.Length];
             order = new int[bunches.Length];
             for (int i = 0; i < bunches.Length; i++)
             {
@@ -58,8 +61,11 @@ namespace Vineyard.Winery
                 if (!bunches[i]) continue;
                 float target = k < visible ? 1f : 0f;
                 float speed = target > bunchShown[i] ? 1.2f : 4f;       // grow slowly, pick quickly
-                bunchShown[i] = Mathf.MoveTowards(bunchShown[i], target, Time.deltaTime * speed);
-                float s = bunchShown[i];
+                float s = Mathf.MoveTowards(bunchShown[i], target, Time.deltaTime * speed);
+                // Settled bunches (the usual case) need no transform write: avoids ~100 transform changes per frame.
+                if (s == bunchShown[i] && bunchApplied[i]) continue;
+                bunchShown[i] = s;
+                bunchApplied[i] = true;
                 // Overshoot a little when growing back ("pop").
                 float pop = s < 1f && target > 0f ? 1f + Mathf.Sin(s * Mathf.PI) * 0.15f : 1f;
                 bunches[i].localScale = bunchScale[i] * (Mathf.SmoothStep(0f, 1f, s) * pop);
@@ -67,14 +73,15 @@ namespace Vineyard.Winery
                 if (bunches[i].gameObject.activeSelf != on) bunches[i].gameObject.SetActive(on);
             }
 
-            if (foliage)
+            if (foliage && !(wobble <= 0f && foliageAtRest))
             {
                 wobble = Mathf.MoveTowards(wobble, 0f, Time.deltaTime * 1.8f);
+                foliageAtRest = wobble <= 0f;
                 float a = Mathf.Sin(wobble * 18f) * 4f * wobble;
                 foliage.localRotation = foliageRest * Quaternion.Euler(a * 0.4f, 0f, a);
             }
         }
 
-        public void PlayHarvestFeedback() => wobble = 1f;
+        public void PlayHarvestFeedback() { wobble = 1f; foliageAtRest = false; }
     }
 }

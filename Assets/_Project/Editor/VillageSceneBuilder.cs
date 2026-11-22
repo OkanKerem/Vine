@@ -292,6 +292,10 @@ namespace Vineyard.EditorTools
                 // Production loop (stations, interactables, effects) — kept in WinerySetup so it can also run on its own.
                 Log("Winery gameplay: " + WinerySetup.SetupScene());
 
+                // Rendering / physics optimizations (shadow flags, small-prop culling, collider cleanup, terrain detail range).
+                // Kept in VillagePerformance so they can also be applied to an existing scene.
+                Log("Performance: " + VillagePerformance.OptimizeScene(scene));
+
                 EditorSceneManager.MarkSceneDirty(scene);
                 EditorSceneManager.SaveScene(scene, ScenePath);
                 AddSceneToBuildSettingsFirst(ScenePath);

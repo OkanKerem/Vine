@@ -25,6 +25,7 @@ namespace Vineyard.Winery
         Texture2D white;
         float bucketPulse;
         int lastAmount = -1;
+        Camera playerCam;
 
         static readonly Color Panel = new Color(0.08f, 0.06f, 0.05f, 0.62f);
         static readonly Color Gold = new Color(1f, 0.86f, 0.55f);
@@ -138,7 +139,7 @@ namespace Vineyard.Winery
             // Floating texts rising from the station.
             var cam = Camera.current != null ? Camera.current : Camera.main;
             floaters.RemoveAll(f => now - f.time > 1.6f);
-            var playerCam = GetComponentInChildren<Camera>();
+            if (playerCam == null) playerCam = GetComponentInChildren<Camera>();   // cached: OnGUI runs several times per frame
             if (playerCam != null && playerCam.enabled) cam = playerCam;
             if (cam != null)
                 foreach (var f in floaters)
