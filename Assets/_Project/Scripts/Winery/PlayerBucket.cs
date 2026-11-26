@@ -31,22 +31,32 @@ namespace Vineyard.Winery
 
         public static PlayerBucket Local { get; private set; }
 
+        /// <summary>
+        /// Set every frame by <see cref="Vineyard.Building.PlayerBuilder"/> while the hammer is in hand: the bucket is
+        /// stowed (hidden, contents kept). Derived from replicated state, so it is the same on every client.
+        /// </summary>
+        public bool HiddenByTool { get; set; }
+
         void Update()
         {
-            // Hide the bucket models while the hands are empty (BucketVisual keeps animating its children).
-            if (isLocalPlayer && viewBucket && viewBucket.activeSelf != hasBucket) viewBucket.SetActive(hasBucket);
-            if (worldBucketRenderers != null && worldVisible != hasBucket)
+            // Hide the bucket models while the hands are empty or hold the hammer (BucketVisual keeps animating its children).
+            bool show = hasBucket && !HiddenByTool;
+            if (isLocalPlayer && viewBucket && viewBucket.activeSelf != show) viewBucket.SetActive(show);
+            if (worldBucketRenderers != null && worldVisible != show)
             {
-                worldVisible = hasBucket;
-                foreach (var r in worldBucketRenderers) if (r) r.forceRenderingOff = !hasBucket;
+                worldVisible = show;
+                foreach (var r in worldBucketRenderers) if (r) r.forceRenderingOff = !show;
             }
         }
         bool worldVisible = true;
 
+        /// <summary>Players joining after a bucket upgrade start with the team capacity.</summary>
+        public override void OnStartServer() => capacity = Vineyard.Upgrades.TeamUpgrades.BucketCapacity(capacity);
+
         public override void OnStartLocalPlayer()
         {
             Local = this;
-            if (viewBucket) viewBucket.SetActive(hasBucket);
+            if (viewBucket) viewBucket.SetActive(hasBucket && !HiddenByTool);
             if (worldBucketRenderers != null)
                 foreach (var r in worldBucketRenderers)
                     if (r) r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.ShadowsOnly;

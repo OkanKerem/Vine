@@ -31,12 +31,13 @@ namespace Vineyard.Player
             Quaternion yawRot = Quaternion.Euler(0f, cmd.yaw, 0f);
             Vector3 wish = yawRot * new Vector3(cmd.moveX, 0f, cmd.moveY);
             wish = Vector3.ClampMagnitude(wish, 1f);
-            float speed = cmd.sprint ? sprintSpeed : walkSpeed;
+            // Team upgrades (replicated levels): the host and the predicting client use the same values.
+            float speed = (cmd.sprint ? sprintSpeed : walkSpeed) * Vineyard.Upgrades.TeamUpgrades.SpeedMultiplier;
 
             if (Controller.isGrounded)
             {
                 if (VerticalVelocity < 0f) VerticalVelocity = groundedStickVelocity;
-                if (cmd.jump) VerticalVelocity = Mathf.Sqrt(2f * jumpHeight * gravity);
+                if (cmd.jump) VerticalVelocity = Mathf.Sqrt(2f * jumpHeight * Vineyard.Upgrades.TeamUpgrades.JumpMultiplier * gravity);
             }
 
             VerticalVelocity -= gravity * dt;

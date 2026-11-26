@@ -78260,7 +78260,7 @@ MonoBehaviour:
   - {fileID: 533420219}
   - {fileID: 842914519}
   - {fileID: 626336087}
-  capacity: 100
+  capacity: 10000
   moneyPerLitre: 0.1
   wineLiquid: {fileID: 1813712884}
   fullHeight: 3.9

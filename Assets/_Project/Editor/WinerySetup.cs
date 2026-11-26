@@ -36,23 +36,25 @@ namespace Vineyard.EditorTools
             string w = SetupWorldBucketPrefab();
             Debug.Log($"[Winery] {w}");
             string p = SetupPlayerPrefab();
+            string b = BuildSystemSetup.SetupAll();
             string s = SetupScene();
             EditorSceneManager.SaveOpenScenes();
-            Debug.Log($"[Winery] {p}\n{s}");
+            Debug.Log($"[Winery] {p}\n{b}\n{s}");
         }
 
         public static string SetupAll()
         {
             SetupWorldBucketPrefab();
             string p = SetupPlayerPrefab();
+            string b = BuildSystemSetup.SetupAll();
             string s = SetupScene();
             EditorSceneManager.SaveOpenScenes();
-            return p + " | " + s;
+            return p + " | " + b + " | " + s;
         }
 
         // ================================================================== materials
 
-        static Material Mat(string name, Color c, float smooth, bool transparent = false)
+        internal static Material Mat(string name, Color c, float smooth, bool transparent = false)
         {
             if (!AssetDatabase.IsValidFolder(MatDir)) AssetDatabase.CreateFolder("Assets/_Project/Materials", "Winery");
             string path = $"{MatDir}/{name}.mat";
@@ -285,25 +287,8 @@ namespace Vineyard.EditorTools
             var vineInteractables = new List<WineryInteractable>();
             for (int i = 0; i < vinesT.Count; i++)
             {
-                var v = vinesT[i];
-                var gc = v.gameObject.AddComponent<GrapevineController>();
-                gc.bunches = v.GetComponentsInChildren<Transform>(true).Where(t => t.name == "GrapeBunch").ToArray();
-                gc.maxGrapes = Mathf.Max(1, gc.bunches.Length);      // one grape per visible bunch
-                gc.foliage = v.GetComponentsInChildren<Transform>(true).FirstOrDefault(t => t.name == "Grapevine_Mesh");
-                vines.Add(gc);
-
-                // Generous trigger so aiming at leaves or bunches works (players still collide with the trellis box).
-                var b = WorldBounds(v);
-                var vol = new GameObject("Winery_HarvestVolume");
-                vol.transform.SetParent(v, false);
-                var box = vol.AddComponent<BoxCollider>();
-                box.isTrigger = true;
-                Vector3 localCenter = v.InverseTransformPoint(b.center);
-                Vector3 localSize = Abs(Quaternion.Inverse(v.rotation) * b.size);
-                localSize.z = Mathf.Max(localSize.z, 0.9f);
-                localSize.x = Mathf.Max(localSize.x, 0.9f);
-                box.center = localCenter; box.size = localSize;
-                vineInteractables.Add(Interactable(v.gameObject, vineyard, InteractionPart.Harvest, i, v.GetComponentsInChildren<Renderer>(true)));
+                vines.Add(WireVine(vinesT[i], vineyard, i, out var it));
+                vineInteractables.Add(it);
             }
             vineyard.vines = vines.ToArray();
             vineyard.interactables = vineInteractables.ToArray();
@@ -314,46 +299,7 @@ namespace Vineyard.EditorTools
             if (press)
             {
                 var pc = Station<GrapePressController>(gameplay, "Station_GrapePress", "Grape Press");
-                Transform P(string n) => press.GetComponentsInChildren<Transform>(true).FirstOrDefault(t => t.name == n);
-                pc.handle = P("Press_Handle"); pc.screw = P("Press_Screw"); pc.plate = P("Press_Plate"); pc.grapes = P("Press_Grapes");
-                var list = new List<WineryInteractable>();
-                list.Add(Interactable(P("Press_Container").gameObject, pc, InteractionPart.PressInput, 0, R(P("Press_Container"), P("Press_Grapes"))));
-                // A grip volume around the handle / screw top makes the thin handle easy to aim at.
-                var grip = new GameObject("Winery_HandleGrip");
-                grip.transform.SetParent(pc.handle, false);
-                var hb = WorldBounds(pc.handle);
-                grip.transform.position = hb.center;
-                var gbox = grip.AddComponent<BoxCollider>();
-                gbox.isTrigger = true;
-                gbox.size = Abs(Quaternion.Inverse(grip.transform.rotation) * (hb.size + new Vector3(0.15f, 0.3f, 0.15f)));
-                list.Add(Interactable(pc.handle.gameObject, pc, InteractionPart.PressHandle, 0, R(pc.handle, pc.screw)));
-                list.Add(Interactable(pc.screw.gameObject, pc, InteractionPart.PressHandle, 0, R(pc.handle, pc.screw)));
-                list.Add(Interactable(pc.plate.gameObject, pc, InteractionPart.PressHandle, 0, R(pc.handle, pc.screw, pc.plate)));
-                list.Add(Interactable(P("Press_Bucket").gameObject, pc, InteractionPart.PressOutput, 0, R(P("Press_Bucket"), P("Press_OutputSpout"))));
-                list.Add(Interactable(P("Press_OutputSpout").gameObject, pc, InteractionPart.PressOutput, 0, R(P("Press_Bucket"), P("Press_OutputSpout"))));
-                foreach (var c in P("Press_Frame").GetComponents<Collider>()) c.gameObject.layer = IgnoreRaycastLayer;
-                pc.interactables = list.ToArray();
-
-                // Juice collecting in the output bucket.
-                var bb = WorldBounds(P("Press_Bucket"));
-                var jp = new GameObject("Winery_JuiceLevel").transform;
-                jp.SetParent(press, false);
-                jp.position = new Vector3(bb.center.x, bb.min.y + 0.03f, bb.center.z);
-                jp.localScale = new Vector3(bb.size.x * 0.5f, 0.001f, bb.size.z * 0.5f);
-                var cyl = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-                Object.DestroyImmediate(cyl.GetComponent<Collider>());
-                cyl.name = "Liquid";
-                cyl.transform.SetParent(jp, false);
-                cyl.transform.localPosition = new Vector3(0f, 1f, 0f);
-                cyl.GetComponent<MeshRenderer>().sharedMaterial = JuiceMat;
-                pc.juiceLiquid = jp; pc.juiceRenderer = cyl.GetComponent<MeshRenderer>();
-                jp.gameObject.SetActive(false);
-                // Juice dripping from the spout while pressing.
-                var sp = WorldBounds(P("Press_OutputSpout"));
-                Vector3 tip = sp.center + (bb.center - sp.center).normalized * 0.0f;
-                if (!pc.crushSplashPrefab) pc.crushSplashPrefab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/Polygonal Particles/Assets/Prefabs/Water/Splash_Mobile.prefab");
-                pc.juiceStream = Stream(press, "Winery_JuiceStream", new Vector3(sp.center.x, sp.min.y, sp.center.z) + (new Vector3(bb.center.x, 0, bb.center.z) - new Vector3(sp.center.x, 0, sp.center.z)) * 0.6f,
-                                        Vector3.down, JuiceMat, 40f, 0.3f, 0.6f, 0.35f, 0.035f);
+                WirePress(press, pc);
                 log.Add("press: input/handle/output wired, juice level + stream");
             }
             else log.Add("press: SmallGrapePress NOT FOUND");
@@ -363,24 +309,7 @@ namespace Vineyard.EditorTools
             if (ferm)
             {
                 var fc = Station<FermentationMachineController>(gameplay, "Station_Fermenter", "Fermentation Machine");
-                Transform F(string n) => ferm.GetComponentsInChildren<Transform>(true).FirstOrDefault(t => t.name == n);
-                fc.lid = F("Fermenter_InputLid"); fc.needle = F("Fermenter_ProgressNeedle"); fc.dial = F("Fermenter_ProgressDial");
-                fc.liquid = F("Fermenter_Liquid"); fc.liquidRenderer = fc.liquid ? fc.liquid.GetComponent<Renderer>() : null;
-                var inputHighlight = R(F("Fermenter_InputLid"), F("Fermenter_InputOpening"), F("Fermenter_MainTank"));
-                var outputHighlight = R(F("Fermenter_OutputTap"), F("Fermenter_OutputHandle"), F("Fermenter_OutputBucket"));
-                var list = new List<WineryInteractable>();
-                foreach (var n in new[] { "Fermenter_InputLid", "Fermenter_InputOpening", "Fermenter_MainTank", "Fermenter_InspectionGlass", "Fermenter_ProgressDial", "Fermenter_ProgressNeedle" })
-                    if (F(n)) list.Add(Interactable(F(n).gameObject, fc, InteractionPart.FermenterInput, 0, inputHighlight));
-                foreach (var n in new[] { "Fermenter_OutputTap", "Fermenter_OutputHandle", "Fermenter_OutputBucket" })
-                    if (F(n)) list.Add(Interactable(F(n).gameObject, fc, InteractionPart.FermenterOutput, 0, outputHighlight));
-                foreach (var n in new[] { "Fermenter_MetalBands", "Fermenter_WoodenFrame" })
-                    if (F(n)) F(n).gameObject.layer = IgnoreRaycastLayer;
-                fc.interactables = list.ToArray();
-
-                var ob = WorldBounds(F("Fermenter_InputOpening"));
-                fc.pourStream = Stream(ferm, "Winery_PourStream", ob.center + Vector3.up * 0.75f, Vector3.down, JuiceMat, 70f, 0.4f, 1.2f, 0.55f, 0.045f);
-                fc.bubbles = Stream(ferm, "Winery_Bubbles", ob.center + Vector3.up * 0.05f, Vector3.up, BubbleMat, 5f, 0.25f, -0.05f, 1.4f, 0.03f, 25f, 0.18f);
-                if (!fc.bubblesPrefab) fc.bubblesPrefab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/NamuFX/StylizedWaterEffects/Prefabs/Bubbles_Vertical_Loop.prefab");
+                WireFermenter(ferm, fc);
                 log.Add("fermenter: lid, needle, liquid, pour stream, bubbles wired");
             }
             else log.Add("fermenter: SmallFermentationStation NOT FOUND");
@@ -423,6 +352,99 @@ namespace Vineyard.EditorTools
             return "Scene: " + string.Join("; ", log);
         }
 
+        // ================================================================== station wiring (scene + buildable prefabs)
+
+        /// <summary>Makes one grapevine model harvestable as vine <paramref name="i"/> of <paramref name="vineyard"/>.</summary>
+        internal static GrapevineController WireVine(Transform v, VineyardController vineyard, int i, out WineryInteractable interactable)
+        {
+            var gc = v.gameObject.AddComponent<GrapevineController>();
+            gc.bunches = v.GetComponentsInChildren<Transform>(true).Where(t => t.name == "GrapeBunch").ToArray();
+            gc.maxGrapes = Mathf.Max(1, gc.bunches.Length);      // one grape per visible bunch
+            gc.foliage = v.GetComponentsInChildren<Transform>(true).FirstOrDefault(t => t.name == "Grapevine_Mesh");
+
+            // Generous trigger so aiming at leaves or bunches works (players still collide with the trellis box).
+            var b = WorldBounds(v);
+            var vol = new GameObject("Winery_HarvestVolume");
+            vol.transform.SetParent(v, false);
+            var box = vol.AddComponent<BoxCollider>();
+            box.isTrigger = true;
+            Vector3 localCenter = v.InverseTransformPoint(b.center);
+            Vector3 localSize = Abs(Quaternion.Inverse(v.rotation) * b.size);
+            localSize.z = Mathf.Max(localSize.z, 0.9f);
+            localSize.x = Mathf.Max(localSize.x, 0.9f);
+            box.center = localCenter; box.size = localSize;
+            interactable = Interactable(v.gameObject, vineyard, InteractionPart.Harvest, i, v.GetComponentsInChildren<Renderer>(true));
+            return gc;
+        }
+
+        /// <summary>Wires a SmallGrapePress model (with part colliders) to its press station.</summary>
+        internal static void WirePress(Transform press, GrapePressController pc)
+        {
+            Transform P(string n) => press.GetComponentsInChildren<Transform>(true).FirstOrDefault(t => t.name == n);
+            pc.handle = P("Press_Handle"); pc.screw = P("Press_Screw"); pc.plate = P("Press_Plate"); pc.grapes = P("Press_Grapes");
+            var list = new List<WineryInteractable>();
+            list.Add(Interactable(P("Press_Container").gameObject, pc, InteractionPart.PressInput, 0, R(P("Press_Container"), P("Press_Grapes"))));
+            // A grip volume around the handle / screw top makes the thin handle easy to aim at.
+            var grip = new GameObject("Winery_HandleGrip");
+            grip.transform.SetParent(pc.handle, false);
+            var hb = WorldBounds(pc.handle);
+            grip.transform.position = hb.center;
+            var gbox = grip.AddComponent<BoxCollider>();
+            gbox.isTrigger = true;
+            gbox.size = Abs(Quaternion.Inverse(grip.transform.rotation) * (hb.size + new Vector3(0.15f, 0.3f, 0.15f)));
+            list.Add(Interactable(pc.handle.gameObject, pc, InteractionPart.PressHandle, 0, R(pc.handle, pc.screw)));
+            list.Add(Interactable(pc.screw.gameObject, pc, InteractionPart.PressHandle, 0, R(pc.handle, pc.screw)));
+            list.Add(Interactable(pc.plate.gameObject, pc, InteractionPart.PressHandle, 0, R(pc.handle, pc.screw, pc.plate)));
+            list.Add(Interactable(P("Press_Bucket").gameObject, pc, InteractionPart.PressOutput, 0, R(P("Press_Bucket"), P("Press_OutputSpout"))));
+            list.Add(Interactable(P("Press_OutputSpout").gameObject, pc, InteractionPart.PressOutput, 0, R(P("Press_Bucket"), P("Press_OutputSpout"))));
+            foreach (var c in P("Press_Frame").GetComponents<Collider>()) c.gameObject.layer = IgnoreRaycastLayer;
+            pc.interactables = list.ToArray();
+
+            // Juice collecting in the output bucket.
+            var bb = WorldBounds(P("Press_Bucket"));
+            var jp = new GameObject("Winery_JuiceLevel").transform;
+            jp.SetParent(press, false);
+            jp.position = new Vector3(bb.center.x, bb.min.y + 0.03f, bb.center.z);
+            jp.localScale = new Vector3(bb.size.x * 0.5f, 0.001f, bb.size.z * 0.5f);
+            var cyl = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+            Object.DestroyImmediate(cyl.GetComponent<Collider>());
+            cyl.name = "Liquid";
+            cyl.transform.SetParent(jp, false);
+            cyl.transform.localPosition = new Vector3(0f, 1f, 0f);
+            cyl.GetComponent<MeshRenderer>().sharedMaterial = JuiceMat;
+            pc.juiceLiquid = jp; pc.juiceRenderer = cyl.GetComponent<MeshRenderer>();
+            jp.gameObject.SetActive(false);
+            // Juice dripping from the spout while pressing.
+            var sp = WorldBounds(P("Press_OutputSpout"));
+            Vector3 tip = sp.center + (bb.center - sp.center).normalized * 0.0f;
+            if (!pc.crushSplashPrefab) pc.crushSplashPrefab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/Polygonal Particles/Assets/Prefabs/Water/Splash_Mobile.prefab");
+            pc.juiceStream = Stream(press, "Winery_JuiceStream", new Vector3(sp.center.x, sp.min.y, sp.center.z) + (new Vector3(bb.center.x, 0, bb.center.z) - new Vector3(sp.center.x, 0, sp.center.z)) * 0.6f,
+                                    Vector3.down, JuiceMat, 40f, 0.3f, 0.6f, 0.35f, 0.035f);
+        }
+
+        /// <summary>Wires a SmallFermentationStation model (with part colliders) to its fermenter station.</summary>
+        internal static void WireFermenter(Transform ferm, FermentationMachineController fc)
+        {
+            Transform F(string n) => ferm.GetComponentsInChildren<Transform>(true).FirstOrDefault(t => t.name == n);
+            fc.lid = F("Fermenter_InputLid"); fc.needle = F("Fermenter_ProgressNeedle"); fc.dial = F("Fermenter_ProgressDial");
+            fc.liquid = F("Fermenter_Liquid"); fc.liquidRenderer = fc.liquid ? fc.liquid.GetComponent<Renderer>() : null;
+            var inputHighlight = R(F("Fermenter_InputLid"), F("Fermenter_InputOpening"), F("Fermenter_MainTank"));
+            var outputHighlight = R(F("Fermenter_OutputTap"), F("Fermenter_OutputHandle"), F("Fermenter_OutputBucket"));
+            var list = new List<WineryInteractable>();
+            foreach (var n in new[] { "Fermenter_InputLid", "Fermenter_InputOpening", "Fermenter_MainTank", "Fermenter_InspectionGlass", "Fermenter_ProgressDial", "Fermenter_ProgressNeedle" })
+                if (F(n)) list.Add(Interactable(F(n).gameObject, fc, InteractionPart.FermenterInput, 0, inputHighlight));
+            foreach (var n in new[] { "Fermenter_OutputTap", "Fermenter_OutputHandle", "Fermenter_OutputBucket" })
+                if (F(n)) list.Add(Interactable(F(n).gameObject, fc, InteractionPart.FermenterOutput, 0, outputHighlight));
+            foreach (var n in new[] { "Fermenter_MetalBands", "Fermenter_WoodenFrame" })
+                if (F(n)) F(n).gameObject.layer = IgnoreRaycastLayer;
+            fc.interactables = list.ToArray();
+
+            var ob = WorldBounds(F("Fermenter_InputOpening"));
+            fc.pourStream = Stream(ferm, "Winery_PourStream", ob.center + Vector3.up * 0.75f, Vector3.down, JuiceMat, 70f, 0.4f, 1.2f, 0.55f, 0.045f);
+            fc.bubbles = Stream(ferm, "Winery_Bubbles", ob.center + Vector3.up * 0.05f, Vector3.up, BubbleMat, 5f, 0.25f, -0.05f, 1.4f, 0.03f, 25f, 0.18f);
+            if (!fc.bubblesPrefab) fc.bubblesPrefab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/NamuFX/StylizedWaterEffects/Prefabs/Bubbles_Vertical_Loop.prefab");
+        }
+
         static T Station<T>(Transform parent, string name, string display) where T : WineryStation
         {
             var go = new GameObject(name);
@@ -444,7 +466,7 @@ namespace Vineyard.EditorTools
 
         static Renderer[] R(params Transform[] ts) => ts.Where(t => t).SelectMany(t => t.GetComponentsInChildren<Renderer>(true)).Distinct().ToArray();
 
-        static Bounds WorldBounds(Transform t)
+        internal static Bounds WorldBounds(Transform t)
         {
             var rs = t.GetComponentsInChildren<Renderer>(true).Where(r => !(r is ParticleSystemRenderer)).ToArray();
             if (rs.Length == 0) return new Bounds(t.position, Vector3.zero);

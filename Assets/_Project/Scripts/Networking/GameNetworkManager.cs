@@ -2,6 +2,8 @@ using System;
 using System.Linq;
 using Mirror;
 using UnityEngine;
+using Vineyard.Building;
+using Vineyard.Upgrades;
 using Vineyard.Winery;
 
 namespace Vineyard.Networking
@@ -32,6 +34,8 @@ namespace Vineyard.Networking
         [Header("Winery")]
         [Tooltip("Empty spare buckets the host places next to each machine output (press, fermenter) at start.")]
         public int spareBucketsPerMachine = 1;
+        [Tooltip("Building hammers the host lays on the ground next to the first spawn point at start.")]
+        public int hammers = 1;
 
         public override void Awake()
         {
@@ -39,13 +43,37 @@ namespace Vineyard.Networking
             // Ground buckets are spawned at runtime: host and clients must both know the prefab.
             var wb = WorldBucket.Prefab;
             if (wb != null && !spawnPrefabs.Contains(wb)) spawnPrefabs.Add(wb);
+            var tu = TeamUpgrades.Prefab;
+            if (tu != null && !spawnPrefabs.Contains(tu)) spawnPrefabs.Add(tu);
+            var wh = WorldHammer.Prefab;
+            if (wh != null && !spawnPrefabs.Contains(wh)) spawnPrefabs.Add(wh);
+            // Buildable stations (grape field, press, fermenter) are spawned by the host's build system.
+            var catalog = BuildCatalog.Instance;
+            if (catalog != null)
+                foreach (var e in catalog.entries)
+                    if (e != null && e.prefab != null && !spawnPrefabs.Contains(e.prefab)) spawnPrefabs.Add(e.prefab);
             base.Awake();
         }
 
         public override void OnStartServer()
         {
             base.OnStartServer();
+            TeamUpgrades.ServerSpawn();
             SpawnSpareBuckets();
+            SpawnHammers();
+        }
+
+        /// <summary>Hammers lie next to the spawn: a player puts the bucket down (Q) and picks one up to build.</summary>
+        void SpawnHammers()
+        {
+            if (hammers <= 0 || WorldHammer.Prefab == null) return;
+            Vector3 centre = startPositions.Count > 0 && startPositions[0] != null ? startPositions[0].position : Vector3.zero;
+            Vector3 fwd = startPositions.Count > 0 && startPositions[0] != null ? startPositions[0].forward : Vector3.forward;
+            for (int k = 0; k < hammers; k++)
+            {
+                Vector3 spot = WorldBucket.FindGroundSpot(centre, Quaternion.Euler(0f, 35f + k * 30f, 0f) * fwd, 1.6f + k * 0.4f, 16);
+                WorldHammer.ServerSpawn(spot, UnityEngine.Random.Range(0f, 360f));
+            }
         }
 
         /// <summary>Spare buckets let a player with full hands put theirs down and still empty a full machine.</summary>

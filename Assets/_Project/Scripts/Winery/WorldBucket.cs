@@ -4,7 +4,7 @@ using UnityEngine;
 namespace Vineyard.Winery
 {
     /// <summary>
-    /// A bucket standing on the ground. Players carry one bucket at a time; this lets them put it down (B),
+    /// A bucket standing on the ground. Hands hold one thing at a time (bucket or hammer); this lets players put it down (Q),
     /// grab another one (spare buckets near the machines), and come back for it later.
     /// Clicking it with empty hands picks it up; clicking it while carrying a bucket swaps the two.
     /// Spawned by the host from Resources/WorldBucket (registered in <see cref="Vineyard.Networking.GameNetworkManager"/>).
@@ -33,6 +33,8 @@ namespace Vineyard.Winery
         {
             if (bucket == null) return Blocked("Bucket", Contents, "");
             if (bucket.IsPouring) return Blocked("Bucket", Contents, "Pouring...");
+            var builder = bucket.GetComponent<Vineyard.Building.PlayerBuilder>();
+            if (builder != null && builder.HasHammer) return Action("Bucket", Contents, "Swap hammer for bucket");
             return Action("Bucket", Contents, bucket.HasBucket ? "Swap buckets" : "Pick up");
         }
 
@@ -41,6 +43,18 @@ namespace Vineyard.Winery
         {
             success = false; floatText = null;
             if (target.part != InteractionPart.BucketPickup || bucket == null || bucket.IsPouring) return null;
+
+            // Single slot: a held hammer goes down where this bucket stood.
+            var builder = bucket.GetComponent<Vineyard.Building.PlayerBuilder>();
+            if (builder != null && builder.HasHammer)
+            {
+                if (bucket.HasBucket || !builder.ServerTakeHammer()) return null;
+                Vineyard.Building.WorldHammer.ServerSpawn(transform.position, transform.eulerAngles.y);
+                bucket.ServerGiveBucket(type, amount, capacity);
+                NetworkServer.Destroy(gameObject);
+                success = true;
+                return "Picked up the bucket";
+            }
 
             if (bucket.HasBucket)
             {
@@ -57,6 +71,9 @@ namespace Vineyard.Winery
             return "Picked up the bucket";
         }
 
+        /// <summary>Host: bucket upgrade — never shrinks below the current size.</summary>
+        [Server] public void ServerRaiseCapacity(int c) => capacity = Mathf.Max(capacity, c);
+
         /// <summary>Host: place a bucket on the ground with the given contents.</summary>
         [Server]
         public static WorldBucket ServerSpawn(Vector3 position, float yaw, ResourceType t, int n, int cap)
@@ -64,7 +81,7 @@ namespace Vineyard.Winery
             if (Prefab == null) { Debug.LogError($"[Winery] Resources/{ResourcePath} prefab missing — run Tools > Vineyard > Setup Winery Gameplay."); return null; }
             var go = Instantiate(Prefab, position, Quaternion.Euler(0f, yaw, 0f));
             var wb = go.GetComponent<WorldBucket>();
-            wb.capacity = Mathf.Max(1, cap);
+            wb.capacity = Vineyard.Upgrades.TeamUpgrades.BucketCapacity(Mathf.Max(1, cap));
             wb.amount = Mathf.Clamp(n, 0, wb.capacity);
             wb.type = wb.amount > 0 ? t : ResourceType.Empty;
             NetworkServer.Spawn(go);

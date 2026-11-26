@@ -162,6 +162,7 @@ namespace Vineyard.Player
 
         void HandleCursor()
         {
+            if (Vineyard.UI.UiFocus.Modal) return;   // a panel owns the cursor (and closes itself on Esc)
             var kb = Keyboard.current;
             var mouse = Mouse.current;
             if (kb != null && kb.escapeKey.wasPressedThisFrame)

@@ -12,7 +12,7 @@ namespace Vineyard.Winery
     public class GiantWineBottleController : WineryStation
     {
         [Header("Tuning (upgrade-ready)")]
-        [SyncVar] public int capacity = 100;
+        [SyncVar] public int capacity = 10000;
         [Tooltip("Money the team earns for every litre of wine poured into the bottle.")]
         [SyncVar] public float moneyPerLitre = 0.1f;
 
@@ -136,6 +136,15 @@ namespace Vineyard.Winery
             success = true; floatText = $"+{FormatMoney(earned)} Money";
             return wine >= capacity ? $"Poured {n} L (+{FormatMoney(earned)} money) — the bottle is FULL!"
                                     : $"Poured {n} L (+{FormatMoney(earned)} money) — bottle {Mathf.RoundToInt(Fill * 100)}% full";
+        }
+
+        /// <summary>Takes <paramref name="amount"/> from the team money (build system). False if there is not enough.</summary>
+        [Server]
+        public bool ServerTrySpend(double amount)
+        {
+            if (amount < 0 || double.IsNaN(amount) || money + 1e-6 < amount) return false;
+            money = System.Math.Max(0, money - amount);
+            return true;
         }
 
         /// <summary>Upgrade hook: bigger bottle.</summary>

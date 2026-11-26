@@ -9,7 +9,7 @@ namespace Vineyard.Winery
     /// Juice can be added while the machine is empty, pouring, or holding finished wine (if the output can
     /// take the next batch); never while fermenting. Finished wine is never discarded.
     /// </summary>
-    public class FermentationMachineController : WineryStation
+    public class FermentationMachineController : WineryStation, IUpgradeable
     {
         public enum FermentState : byte { Empty, Loaded, Fermenting, WineReady }
 
@@ -19,6 +19,63 @@ namespace Vineyard.Winery
         [SyncVar] public float fermentDuration = 10f;
         [Tooltip("Lid open + pour + lid close (s). Fermentation starts right after.")]
         [SyncVar] public float pourDuration = 1.8f;
+
+        [Header("Upgrades (aim + U), levels 1-3")]
+        [Tooltip("Price of level 1, 2, 3 (team money).")]
+        public float[] upgradeCost = { 2f, 4f, 6f };
+        [Tooltip("Tank size (litres in and out) at level 1, 2, 3.")]
+        public int[] upgradeCapacity = { 30, 40, 60 };
+        [Tooltip("Seconds to ferment a batch at level 1, 2, 3.")]
+        public float[] upgradeFermentSeconds = { 7.5f, 5.5f, 4f };
+
+        [SyncVar] int upgradeLevel;
+
+        public int UpgradeLevel => upgradeLevel;
+        public int MaxUpgradeLevel => Mathf.Min(upgradeCost.Length, Mathf.Min(upgradeCapacity.Length, upgradeFermentSeconds.Length));
+        public float NextUpgradeCost => upgradeLevel < MaxUpgradeLevel ? upgradeCost[upgradeLevel] : 0f;
+
+        public string UpgradeTitle => "Fermentation Machine";
+        public string UpgradeDescription => "A bigger tank takes more grape juice per batch, and the batch turns into wine faster.";
+        public string UpgradeStatus => $"{Status}   ·   Juice {juice} L   ·   Wine {wine} L";
+
+        public UpgradeStat[] UpgradeStats
+        {
+            get
+            {
+                bool max = upgradeLevel >= MaxUpgradeLevel;
+                int cap = inputCapacity;
+                float secs = fermentDuration;
+                int nCap = max ? cap : Mathf.Max(cap, upgradeCapacity[upgradeLevel]);
+                float nSecs = max ? secs : upgradeFermentSeconds[upgradeLevel];
+                string PerMin(int c, float s) => $"{c / Mathf.Max(0.1f, s + pourDuration) * 60f:0} L/min";
+                return new[]
+                {
+                    new UpgradeStat("Tank size", $"{cap} L", max ? null : $"{nCap} L"),
+                    new UpgradeStat("Batch time", $"{secs:0.#} s", max ? null : $"{nSecs:0.#} s"),
+                    new UpgradeStat("Wine output", PerMin(cap, secs), max ? null : PerMin(nCap, nSecs)),
+                };
+            }
+        }
+
+        [Server]
+        public string ServerUpgrade(out bool success, out float paid)
+        {
+            success = false; paid = 0f;
+            if (upgradeLevel >= MaxUpgradeLevel) return "Max level";
+            float cost = NextUpgradeCost;
+            var bank = GiantWineBottleController.Instance;
+            if (bank == null || !bank.ServerTrySpend(cost)) return "Not enough money";
+
+            // A running batch keeps its progress and finishes at the new speed.
+            float progress = state == FermentState.Fermenting ? Progress : 0f;
+            inputCapacity = Mathf.Max(inputCapacity, upgradeCapacity[upgradeLevel]);
+            outputCapacity = Mathf.Max(outputCapacity, upgradeCapacity[upgradeLevel]);
+            fermentDuration = upgradeFermentSeconds[upgradeLevel];
+            if (state == FermentState.Fermenting) fermentStart = Now - progress * fermentDuration;
+            upgradeLevel++;
+            success = true; paid = cost;
+            return $"Fermenter level {upgradeLevel} — {inputCapacity} L, {fermentDuration:0.#} s";
+        }
 
         [Header("Moving parts (from the SmallFermentationStation model)")]
         public Transform lid;              // Fermenter_InputLid

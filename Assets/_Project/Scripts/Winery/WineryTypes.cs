@@ -12,6 +12,7 @@ namespace Vineyard.Winery
         FermenterInput = 20, FermenterOutput = 21,
         BottleFunnel = 30, BottleBody = 31, BottleTap = 32,
         BucketPickup = 40,
+        HammerPickup = 41,
     }
 
     /// <summary>Anything that shows bucket contents (the carried bucket, or one standing on the ground).</summary>
@@ -23,6 +24,32 @@ namespace Vineyard.Winery
         /// <summary>0..1 through a tip-out animation, or -1 when not pouring.</summary>
         float PourProgress { get; }
         ResourceType PourType { get; }
+    }
+
+    /// <summary>One line of the upgrade panel: "Tank size   20 L → 30 L". <c>next</c> is null at max level.</summary>
+    public struct UpgradeStat
+    {
+        public string label, now, next;
+        public UpgradeStat(string label, string now, string next) { this.label = label; this.now = now; this.next = next; }
+    }
+
+    /// <summary>A station that can be upgraded on its own (aim at it, press U). Levels 0..MaxUpgradeLevel.</summary>
+    public interface IUpgradeable
+    {
+        int UpgradeLevel { get; }
+        int MaxUpgradeLevel { get; }
+        /// <summary>Price of the next level (0 when maxed).</summary>
+        float NextUpgradeCost { get; }
+        /// <summary>Panel heading, e.g. "Fermentation Machine".</summary>
+        string UpgradeTitle { get; }
+        /// <summary>What upgrading does, in a sentence or two.</summary>
+        string UpgradeDescription { get; }
+        /// <summary>Live state of the machine ("Fermenting 12 L — 45%").</summary>
+        string UpgradeStatus { get; }
+        /// <summary>Current values and what the next level changes them to.</summary>
+        UpgradeStat[] UpgradeStats { get; }
+        /// <summary>Host: pay and apply the next level. Returns the message for the buyer.</summary>
+        string ServerUpgrade(out bool success, out float paid);
     }
 
     /// <summary>What the HUD shows for the targeted object (computed on the client from synced state).</summary>

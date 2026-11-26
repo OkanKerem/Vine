@@ -2,7 +2,9 @@ using System;
 using Mirror;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using Vineyard.Building;
 using Vineyard.Player;
+using Vineyard.Upgrades;
 
 namespace Vineyard.Winery
 {
@@ -39,6 +41,8 @@ namespace Vineyard.Winery
 
         NetworkPlayer player;
         PlayerBucket bucket;
+        PlayerBuilder builder;
+        UpgradeMenu menu;
         bool wasLocked;
         float nextClickTime;
         double lastServerRequest;
@@ -49,9 +53,23 @@ namespace Vineyard.Winery
         {
             player = GetComponent<NetworkPlayer>();
             bucket = GetComponent<PlayerBucket>();
+            builder = GetComponent<PlayerBuilder>();
         }
 
-        public override void OnStartLocalPlayer() => Local = this;
+        /// <summary>Hammer in hand (single slot: no bucket): only ground items can be picked up / swapped.</summary>
+        bool HandsOnHammer => builder != null && builder.HasHammer;
+
+        static bool IsPickup(InteractionPart part) => part == InteractionPart.BucketPickup || part == InteractionPart.HammerPickup;
+
+        /// <summary>Floating "+8 Grapes"-style text for the local player (also used by the build system).</summary>
+        public void ShowFloatingText(Vector3 position, string text) => FloatingText?.Invoke(position, text);
+
+        public override void OnStartLocalPlayer()
+        {
+            Local = this;
+            // The U menu is local-only UI: added here so the player prefab needs no extra setup.
+            menu = GetComponent<UpgradeMenu>() ?? gameObject.AddComponent<UpgradeMenu>();
+        }
 
         public override void OnStopLocalPlayer()
         {
@@ -62,6 +80,13 @@ namespace Vineyard.Winery
         void Update()
         {
             if (!isLocalPlayer) return;
+            if ((builder != null && builder.BuildMode) || (menu != null && menu.Open))   // build mode / U menu take the clicks
+            {
+                SetCurrent(null);
+                CurrentPrompt = default;
+                wasLocked = Cursor.lockState == CursorLockMode.Locked;
+                return;
+            }
             Scan();
 
             bool locked = Cursor.lockState == CursorLockMode.Locked;
@@ -74,7 +99,11 @@ namespace Vineyard.Winery
             }
             var kb = Keyboard.current;
             if (locked && kb != null && kb.gKey.wasPressedThisFrame) RequestEmptyBucket();
-            if (locked && kb != null && kb.bKey.wasPressedThisFrame) RequestDropBucket();
+            if (locked && kb != null && kb.qKey.wasPressedThisFrame)                        // Q: put the held item down
+            {
+                if (HandsOnHammer) builder.RequestDropHammer();
+                else RequestDropBucket();
+            }
             wasLocked = locked;
         }
 
@@ -88,7 +117,8 @@ namespace Vineyard.Winery
                 if (Physics.Raycast(ray, out RaycastHit hit, maxDistance, raycastMask, QueryTriggerInteraction.Collide))
                 {
                     var it = hit.collider.GetComponentInParent<WineryInteractable>();
-                    if (it != null && it.station != null && it.station.isActiveAndEnabled && it.station.netId != 0)
+                    if (it != null && it.station != null && it.station.isActiveAndEnabled && it.station.netId != 0 &&
+                        (!HandsOnHammer || IsPickup(it.part)))
                         hitTarget = it;
                 }
             }
@@ -132,6 +162,7 @@ namespace Vineyard.Winery
         {
             if (NetworkTime.time - lastServerRequest < serverMinInterval) return;   // spam / duplicate clicks
             lastServerRequest = NetworkTime.time;
+            if (HandsOnHammer && !IsPickup(part)) return;                            // a hammer can't work machines
             if (bucket.IsPouring) return;                                            // hands busy tipping the bucket
             if (bucket.IsTransferring && UsesBucket(part)) return;                   // still pouring into a machine
 
@@ -155,6 +186,53 @@ namespace Vineyard.Winery
             TargetFeedback(msg, ok, floatText, target.FeedbackPoint);
         }
 
+        // ------------------------------------------------------------------ upgrades
+
+        /// <summary>The aimed station if it can be upgraded (fermenter), else null.</summary>
+        public IUpgradeable AimedUpgradeable => Current != null ? Current.station as IUpgradeable : null;
+
+        /// <summary>U while aiming at a machine: upgrade that machine.</summary>
+        public void RequestUpgradeAimed()
+        {
+            if (Current != null && Current.station is IUpgradeable) CmdUpgradeStation(Current.station.netIdentity);
+        }
+
+        /// <summary>Upgrade panel: buy the next level of a specific machine.</summary>
+        public void RequestUpgradeStation(WineryStation station)
+        {
+            if (station != null && station is IUpgradeable) CmdUpgradeStation(station.netIdentity);
+        }
+
+        /// <summary>U menu: buy the next level of a team upgrade.</summary>
+        public void RequestTeamUpgrade(TeamUpgrade u) => CmdTeamUpgrade(u);
+
+        [Command]
+        void CmdUpgradeStation(NetworkIdentity stationIdentity)
+        {
+            if (NetworkTime.time - lastServerRequest < serverMinInterval) return;
+            lastServerRequest = NetworkTime.time;
+            if (stationIdentity == null || !stationIdentity.TryGetComponent(out WineryStation station) || !(station is IUpgradeable up)) return;
+            Vector3 eye = transform.position + Vector3.up * 1.65f;
+            float dist = float.MaxValue;
+            if (station.interactables != null)
+                foreach (var i in station.interactables) if (i) dist = Mathf.Min(dist, i.DistanceFrom(eye));
+            if (dist > maxDistance + serverTolerance) { TargetFeedback("Out of Range", false, null, Vector3.zero); return; }
+            string msg = up.ServerUpgrade(out bool ok, out float paid);
+            var at = station.interactables != null && station.interactables.Length > 0 && station.interactables[0] ? station.interactables[0].FeedbackPoint : station.transform.position;
+            TargetFeedback(msg, ok, ok ? $"-{GiantWineBottleController.FormatMoney(paid)}" : null, at);
+        }
+
+        [Command]
+        void CmdTeamUpgrade(TeamUpgrade u)
+        {
+            if (NetworkTime.time - lastServerRequest < serverMinInterval) return;
+            lastServerRequest = NetworkTime.time;
+            var team = TeamUpgrades.Instance;
+            if (team == null || (byte)u > (byte)TeamUpgrade.Bucket) return;
+            string msg = team.ServerBuy(u, out bool ok, out float paid);
+            TargetFeedback(msg, ok, ok ? $"-{GiantWineBottleController.FormatMoney(paid)}" : null, transform.position + transform.forward * 1.2f + Vector3.up * 1.7f);
+        }
+
         /// <summary>Parts that move content in or out of the bucket (the press handle does not).</summary>
         static bool UsesBucket(InteractionPart part) =>
             part != InteractionPart.PressHandle && part != InteractionPart.BottleBody && part != InteractionPart.BottleTap;
@@ -165,7 +243,7 @@ namespace Vineyard.Winery
             if (bucket.HasBucket && bucket.Amount > 0 && !bucket.IsBusy) CmdEmptyBucket();
         }
 
-        /// <summary>B: put the bucket down in front of the player (also used by automated tests).</summary>
+        /// <summary>Q: put the bucket down in front of the player (also used by automated tests).</summary>
         public void RequestDropBucket()
         {
             if (bucket.HasBucket && !bucket.IsBusy) CmdDropBucket();
@@ -176,7 +254,7 @@ namespace Vineyard.Winery
         {
             if (NetworkTime.time - lastServerRequest < serverMinInterval) return;
             lastServerRequest = NetworkTime.time;
-            if (!bucket.HasBucket || bucket.IsBusy || WorldBucket.Prefab == null) return;
+            if (HandsOnHammer || !bucket.HasBucket || bucket.IsBusy || WorldBucket.Prefab == null) return;
             Vector3 fwd = transform.forward;
             Vector3 spot = WorldBucket.FindGroundSpot(transform.position, fwd, 0.85f);
             if (!bucket.ServerTakeBucket(out var t, out int n, out int cap)) return;
@@ -190,6 +268,7 @@ namespace Vineyard.Winery
         {
             if (NetworkTime.time - lastServerRequest < serverMinInterval) return;
             lastServerRequest = NetworkTime.time;
+            if (HandsOnHammer) return;
             ResourceType t = bucket.Type;
             int n = bucket.Amount;
             if (bucket.ServerEmpty())

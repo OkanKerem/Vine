@@ -13,6 +13,7 @@ namespace Vineyard.Winery
     {
         PlayerInteractor interactor;
         PlayerBucket bucket;
+        Vineyard.Building.PlayerBuilder builder;
 
         struct Floater { public Vector3 pos; public string text; public float time; }
         readonly List<Floater> floaters = new List<Floater>();
@@ -33,6 +34,7 @@ namespace Vineyard.Winery
         {
             interactor = GetComponent<PlayerInteractor>();
             bucket = GetComponent<PlayerBucket>();
+            builder = GetComponent<Vineyard.Building.PlayerBuilder>();
             interactor.FloatingText += (p, t) => floaters.Add(new Floater { pos = p, text = t, time = Time.unscaledTime });
         }
 
@@ -112,6 +114,29 @@ namespace Vineyard.Winery
                 Shadowed(new Rect(w / 2 - pw / 2, y + 30, pw, 24), action, body, Color.white);
                 Shadowed(new Rect(w / 2 - pw / 2, y + 54, pw, 22), prompt.status, small, new Color(0.9f, 0.88f, 0.82f));
                 if (bar) Bar(new Rect(w / 2 - pw / 2 + 20, y + 80, pw - 40, 14), prompt.progress, new Color(0.62f, 0.15f, 0.3f));
+
+                // Upgradeable machine: [U]  ● ● ○  price (or MAX).
+                var up = interactor.AimedUpgradeable;
+                if (up != null)
+                {
+                    int max = up.MaxUpgradeLevel, lvl = up.UpgradeLevel;
+                    Rect ur = new Rect(w / 2 - 110, y + ph + 6, 220, 30);
+                    Box(ur, Panel);
+                    bool maxed = lvl >= max;
+                    var bottleNow = GiantWineBottleController.Instance;
+                    bool afford = maxed || (bottleNow != null && bottleNow.Money + 1e-6 >= up.NextUpgradeCost);
+                    Shadowed(new Rect(ur.x + 10, ur.y, 40, ur.height), maxed ? "" : "<color=#FFD98A>[U]</color>", center, Color.white);
+                    float dot = 11f, gap = 7f, dx = ur.x + 62;
+                    for (int d = 0; d < max; d++)
+                    {
+                        Rect dr = new Rect(dx + d * (dot + gap), ur.y + ur.height / 2 - dot / 2, dot, dot);
+                        Box(dr, new Color(0f, 0f, 0f, 0.5f));
+                        if (d < lvl) Box(new Rect(dr.x + 2, dr.y + 2, dr.width - 4, dr.height - 4), Gold);
+                    }
+                    Shadowed(new Rect(ur.x, ur.y, ur.width - 12, ur.height),
+                             maxed ? "<b>MAX</b>" : $"<b>{GiantWineBottleController.FormatMoney(up.NextUpgradeCost)}</b>", right,
+                             maxed ? new Color(0.75f, 1f, 0.6f) : afford ? Gold : new Color(1f, 0.55f, 0.45f));
+                }
             }
 
             // Bucket (bottom-left).
@@ -123,14 +148,22 @@ namespace Vineyard.Winery
                 Rect r = new Rect(20, h - 118, 230, 98);
                 Box(r, Panel);
                 Box(new Rect(r.x, r.y, 4, r.height), ColorOf(t));
-                Shadowed(new Rect(r.x + 14, r.y + 6, 200, 20), "<b>BUCKET</b>", center, new Color(0.85f, 0.82f, 0.75f));
-                if (bucket.HasBucket && !bucket.IsPouring)
+                bool hammer = builder != null && builder.HasHammer;
+                Shadowed(new Rect(r.x + 14, r.y + 6, 200, 20), hammer ? "<b>HAND</b>" : "<b>BUCKET</b>", center, new Color(0.85f, 0.82f, 0.75f));
+                if (hammer)
+                {
+                    Shadowed(new Rect(r.x + 14, r.y + 6, r.width - 28, 20), "<color=#FFD98A>[Q]</color> Put down", right, new Color(0.85f, 0.82f, 0.75f));
+                    Shadowed(new Rect(r.x + 14, r.y + 28, 210, 24), "<size=18><b>HAMMER</b></size>", center, Gold);
+                    Shadowed(new Rect(r.x + 14, r.y + 54, 210, 36), builder.BuildMode ? "<color=#FFD98A>[B]</color> Exit build mode" : "<color=#FFD98A>[B]</color> Build mode", center, new Color(0.85f, 0.82f, 0.75f));
+                }
+                else if (bucket.HasBucket && !bucket.IsPouring)
                     Shadowed(new Rect(r.x + 14, r.y + 6, r.width - 28, 20),
-                             (bucket.Amount > 0 ? "<color=#FFD98A>[G]</color> Empty   " : "") + "<color=#FFD98A>[B]</color> Put down", right, new Color(0.85f, 0.82f, 0.75f));
-                if (!bucket.HasBucket)
+                             (bucket.Amount > 0 ? "<color=#FFD98A>[G]</color> Empty   " : "") + "<color=#FFD98A>[Q]</color> Put down", right, new Color(0.85f, 0.82f, 0.75f));
+                if (hammer) { }
+                else if (!bucket.HasBucket)
                 {
                     Shadowed(new Rect(r.x + 14, r.y + 28, 210, 24), "<size=18><b>HANDS FREE</b></size>", center, new Color(0.8f, 0.8f, 0.8f));
-                    Shadowed(new Rect(r.x + 14, r.y + 54, 210, 36), "Click a bucket to pick it up", center, new Color(0.85f, 0.82f, 0.75f));
+                    Shadowed(new Rect(r.x + 14, r.y + 54, 210, 36), "Click a bucket or hammer", center, new Color(0.85f, 0.82f, 0.75f));
                 }
                 else
                 {
